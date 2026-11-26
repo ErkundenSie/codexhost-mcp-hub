@@ -479,6 +479,24 @@ test("v2.1.0 imports all same-name MCP config variants with automatic aliases an
     const ghCodex = imp.overview.servers.find((s) => s.name === "github" && s.alias === "Codex");
     const ghPi = imp.overview.servers.find((s) => s.name === "github" && s.alias === "Pi");
     assert.ok(ghCodex && ghPi);
+    // Same-name variants must be grouped adjacently in overview.servers
+    await hub.saveServer({
+      name: "alpha-tool",
+      enabled: true,
+      transport: { type: "http", url: "https://alpha.example.com/mcp" },
+      targets: [],
+    });
+    const ovGrouped = await hub.saveServer({
+      name: "zeta-tool",
+      enabled: true,
+      transport: { type: "http", url: "https://zeta.example.com/mcp" },
+      targets: [],
+    });
+    assert.deepEqual(
+      ovGrouped.servers.map((s) => s.name),
+      ["alpha-tool", "github", "github", "zeta-tool"],
+      "Same-name MCP variants must be sorted and grouped adjacently",
+    );
     assert.equal(ghCodex.targetStatuses.codex, "synced");
     assert.equal(ghCodex.targetStatuses.pi, "off");
     assert.equal(ghPi.targetStatuses.pi, "synced");
@@ -493,7 +511,8 @@ test("v2.1.0 imports all same-name MCP config variants with automatic aliases an
     assert.equal(cursorCfg.mcpServers.github.url, "https://api.githubcopilot.com/mcp/");
     assert.equal(piCfg.mcpServers.github.command, "npx");
 
-    // 4. Explicitly choose Pi on Codex variant -> shows amber `pending-update`, applying transfers ownership cleanly!
+    // 4. Explicitly choose Pi on Codex variant -> shows amber `pending-update`, applying transfers ownership,
+    //    auto-removes the superseded empty Pi variant, and clears the redundant auto-alias on the sole survivor!
     const stagedOverwrite = await hub.setServerTargets({
       id: ghCodex.id,
       targets: ["codex", "cursor", "pi"],
@@ -505,8 +524,14 @@ test("v2.1.0 imports all same-name MCP config variants with automatic aliases an
     const appliedTransfer = await hub.applySingleServer({ id: ghCodex.id });
     assert.equal(appliedTransfer.updatedCount, 1);
     assert.equal(appliedTransfer.overview.summary.pendingChanges, 0);
-    assert.equal(appliedTransfer.overview.servers.find((s) => s.id === ghCodex.id).targetStatuses.pi, "synced");
-    assert.equal(appliedTransfer.overview.servers.find((s) => s.id === ghPi.id).targetStatuses.pi, "off");
+    const survivor = appliedTransfer.overview.servers.find((s) => s.id === ghCodex.id);
+    assert.equal(survivor.targetStatuses.pi, "synced");
+    assert.equal(survivor.alias, "", "Sole surviving variant should clear redundant auto-alias");
+    assert.equal(
+      appliedTransfer.overview.servers.find((s) => s.id === ghPi.id),
+      undefined,
+      "Superseded empty same-name variant should be auto-removed",
+    );
   } finally {
     await rm(tmpRoot, { recursive: true, force: true });
   }
@@ -832,7 +857,7 @@ test("v2.3.0 regression checks: unique same-ms backups, custom target owner clea
       alias: "Alt",
       enabled: true,
       transport: { type: "http", url: "https://alt.example.com/mcp" },
-      targets: [customTarget.id],
+      targets: [],
     });
     const ov2 = await hub.saveServer({
       name: "shared-tool",

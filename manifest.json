@@ -5,7 +5,7 @@
     "en": "MCP Sync Hub",
     "zh-CN": "MCP 统一中心"
   },
-  "version": "2.3.3",
+  "version": "2.3.4",
   "description": {
     "en": "Unified MCP registry and multi-AI config synchronizer for Codex, Pi, Claude Code, Antigravity, Grok, Cursor, Copilot, CodeBuddy, OpenCode, and more.",
     "zh-CN": "跨 AI 统一 MCP 管理与同步中心：一次配置，一键同步到 Codex、Pi、Claude Code、Antigravity、Grok、Cursor、Copilot、CodeBuddy、OpenCode 等 16 家 AI 原生配置。"

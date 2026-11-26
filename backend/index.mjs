@@ -223,12 +223,29 @@ export function createHubController({ dataDir, readSettings, home = os.homedir()
     state.managedKeysByTarget[targetId] = [...set];
   }
 
+  function normalizeSingleVariantAlias(state, serverName) {
+    const remaining = state.servers.filter((s) => s.name === serverName);
+    if (remaining.length === 1 && remaining[0].alias && remaining[0].autoAlias !== false) {
+      remaining[0].alias = "";
+      remaining[0].autoAlias = false;
+    }
+  }
+
   function releaseSiblingTargetClaims(state, winnerServer, targetId) {
+    const removedIds = new Set();
     for (const other of state.servers) {
       if (other.id === winnerServer.id || other.name !== winnerServer.name) continue;
       if (Array.isArray(other.targets) && other.targets.includes(targetId)) {
         other.targets = other.targets.filter((id) => id !== targetId);
+        // If this same-name variant is no longer used by any AI after being overwritten, remove it
+        if (other.targets.length === 0) {
+          removedIds.add(other.id);
+        }
       }
+    }
+    if (removedIds.size > 0) {
+      state.servers = state.servers.filter((s) => !removedIds.has(s.id));
+      normalizeSingleVariantAlias(state, winnerServer.name);
     }
   }
 
@@ -355,6 +372,17 @@ export function createHubController({ dataDir, readSettings, home = os.homedir()
       };
     });
 
+    const syncedCountOf = (srv) =>
+      Object.values(srv.targetStatuses ?? {}).filter((st) => st === "synced").length;
+    enrichedServers.sort((a, b) => {
+      const nameCmp = a.name.toLowerCase().localeCompare(b.name.toLowerCase());
+      if (nameCmp !== 0) return nameCmp;
+      const syncDiff = syncedCountOf(b) - syncedCountOf(a);
+      if (syncDiff !== 0) return syncDiff;
+      if (!a.alias !== !b.alias) return !a.alias ? -1 : 1;
+      return (a.alias || "").localeCompare(b.alias || "");
+    });
+
     const pendingTargets = diffs.filter((d) => d.hasChanges).length;
     const pendingChanges = diffs.reduce(
       (sum, d) => sum + d.adds.length + d.updates.length + d.removes.length,
@@ -415,10 +443,12 @@ export function createHubController({ dataDir, readSettings, home = os.homedir()
 
       if (existingIdx >= 0) {
         const prev = state.servers[existingIdx];
+        const aliasChanged = alias !== (prev.alias ?? "");
         state.servers[existingIdx] = {
           ...prev,
           name,
           alias,
+          autoAlias: aliasChanged ? false : Boolean(prev.autoAlias),
           description,
           enabled,
           transport,
@@ -431,6 +461,7 @@ export function createHubController({ dataDir, readSettings, home = os.homedir()
           id: randomUUID(),
           name,
           alias,
+          autoAlias: false,
           description,
           enabled,
           transport,
@@ -449,11 +480,12 @@ export function createHubController({ dataDir, readSettings, home = os.homedir()
   async function deleteServer({ id }) {
     return serialize(async () => {
       const state = await store.load();
-      const before = state.servers.length;
-      state.servers = state.servers.filter((s) => s.id !== id);
-      if (state.servers.length === before) {
+      const target = state.servers.find((s) => s.id === id);
+      if (!target) {
         throw new Error("Server not found");
       }
+      state.servers = state.servers.filter((s) => s.id !== id);
+      normalizeSingleVariantAlias(state, target.name);
       await store.save(state);
       return buildOverview();
     });
@@ -942,6 +974,7 @@ export function createHubController({ dataDir, readSettings, home = os.homedir()
                   makeAlias(existing.targets?.length ? existing.targets : []) ||
                   existing.transport?.type ||
                   "v1";
+                existing.autoAlias = true;
               }
             }
           }
@@ -955,6 +988,7 @@ export function createHubController({ dataDir, readSettings, home = os.homedir()
             id: randomUUID(),
             name: native.name,
             alias,
+            autoAlias: Boolean(alias),
             description: "",
             enabled: native.enabled,
             transport: native.transport,
