@@ -47,6 +47,25 @@ export function createHubController({
   const baselineByTarget = new Map();
   /** @type {Array<object>} */
   let autoSyncLogs = [];
+  let autoSyncLogsLoaded = false;
+  let logPersistChain = Promise.resolve();
+
+  async function ensureAutoSyncLogsLoaded() {
+    if (autoSyncLogsLoaded) return;
+    autoSyncLogsLoaded = true;
+    const saved = await store.loadAutoSyncLogs();
+    if (saved.length > 0 && autoSyncLogs.length === 0) {
+      autoSyncLogs = saved.slice(0, MAX_AUTOSYNC_LOGS);
+    }
+  }
+
+  function queuePersistAutoSyncLogs() {
+    const snapshot = [...autoSyncLogs];
+    logPersistChain = logPersistChain
+      .then(() => store.saveAutoSyncLogs(snapshot))
+      .catch(() => {});
+    return logPersistChain;
+  }
 
   const watcher = new McpFileWatcher({
     debounceMs: watchDebounceMs,
@@ -62,6 +81,7 @@ export function createHubController({
       },
       ...autoSyncLogs,
     ].slice(0, MAX_AUTOSYNC_LOGS);
+    queuePersistAutoSyncLogs();
   }
 
   function makeNativeSnapshot(serversMap) {
@@ -413,6 +433,7 @@ export function createHubController({
   }
 
   async function buildOverview() {
+    await ensureAutoSyncLogsLoaded();
     const state = await store.load();
     const targets = await scanTargets(state);
     const diffs = targets.map((t) => {
@@ -1396,6 +1417,7 @@ export function createHubController({
 
   async function handleWatchedTargetChange(sourceTargetId) {
     return serialize(async () => {
+      await ensureAutoSyncLogsLoaded();
       const state = await store.load();
       const scanned = await scanTargets(state);
       const cfg = resolveAutoSyncView(state, scanned);
@@ -1419,6 +1441,7 @@ export function createHubController({
           detail: fresh.error,
         });
         revision++;
+        await logPersistChain;
         return { propagated: 0, blocked: "parse-error" };
       }
 
@@ -1491,6 +1514,7 @@ export function createHubController({
           status: "blocked",
           detail: "mass-wipe-guard",
         });
+        await logPersistChain;
         return { propagated: 0, blocked: "mass-wipe-guard" };
       }
 
@@ -1703,11 +1727,29 @@ export function createHubController({
         await store.save(state);
         revision++;
       }
+      await logPersistChain;
       return { propagated };
     });
   }
 
+  async function readTargetRaw({ targetId }) {
+    const state = await store.load();
+    const target = resolveTargets(state).find((t) => t.id === targetId);
+    if (!target) throw new Error("Target not found");
+    const res = await readTargetConfig(target);
+    return {
+      targetId: target.id,
+      targetName: target.name,
+      configPath: target.configPath,
+      format: target.format,
+      exists: res.exists,
+      error: res.error,
+      rawText: res.rawText,
+    };
+  }
+
   async function initAutoSync() {
+    await ensureAutoSyncLogsLoaded();
     const state = await store.load();
     const scanned = await scanTargets(state);
     await syncWatchers(state, scanned);
@@ -1732,7 +1774,9 @@ export function createHubController({
   }
 
   async function clearAutoSyncLogs() {
+    autoSyncLogsLoaded = true;
     autoSyncLogs = [];
+    await queuePersistAutoSyncLogs();
     revision++;
     return { ok: true, revision };
   }
@@ -1767,6 +1811,7 @@ export function createHubController({
     applySync,
     setTargetEnabled,
     setTargetPath,
+    readTargetRaw,
     addCustomTarget,
     removeCustomTarget,
     scanProject,
@@ -1803,6 +1848,7 @@ export async function activate(ctx) {
   ctx.handle("sync/apply", (params) => controller.applySync(params ?? {}));
   ctx.handle("targets/set-enabled", (params) => controller.setTargetEnabled(params ?? {}));
   ctx.handle("targets/set-path", (params) => controller.setTargetPath(params ?? {}));
+  ctx.handle("targets/read-raw", (params) => controller.readTargetRaw(params ?? {}));
   ctx.handle("targets/custom-add", (params) => controller.addCustomTarget(params ?? {}));
   ctx.handle("targets/custom-remove", (params) => controller.removeCustomTarget(params ?? {}));
   ctx.handle("project/scan", (params) => controller.scanProject(params ?? {}));

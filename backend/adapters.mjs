@@ -93,7 +93,7 @@ export function getBuiltinTargets(home = os.homedir(), platform = process.platfo
       id: "copilot",
       name: "GitHub Copilot CLI",
       shortName: "Copilot",
-      format: "standard-json",
+      format: "copilot-json",
       rootKey: "mcpServers",
       defaultPath: path.join(home, ".copilot", "mcp-config.json"),
       detectFiles: [
@@ -259,7 +259,7 @@ export async function atomicWriteText(filePath, content) {
 /**
  * Convert canonical MCP Hub server to target-specific JSON entry.
  */
-function serializeJsonEntry(server, format) {
+function serializeJsonEntry(server, format, existingEntry = null) {
   const t = server.transport;
   if (format === "opencode-json") {
     if (t.type === "stdio") {
@@ -277,6 +277,31 @@ function serializeJsonEntry(server, format) {
       url: t.url,
       ...(Object.keys(headers).length ? { headers } : {}),
       enabled: server.enabled !== false,
+    };
+  }
+
+  if (format === "copilot-json") {
+    const preservedTools =
+      Array.isArray(existingEntry?.tools) && existingEntry.tools.length > 0
+        ? existingEntry.tools
+        : ["*"];
+    if (t.type === "stdio") {
+      const env = cleanStringMap(t.env);
+      return {
+        type: "local",
+        command: t.command,
+        ...(t.args?.length ? { args: t.args } : {}),
+        ...(Object.keys(env).length ? { env } : {}),
+        ...(t.cwd ? { cwd: t.cwd } : {}),
+        tools: preservedTools,
+      };
+    }
+    const headers = cleanStringMap(t.headers);
+    return {
+      type: t.type === "sse" ? "sse" : "http",
+      url: t.url,
+      ...(Object.keys(headers).length ? { headers } : {}),
+      tools: preservedTools,
     };
   }
 
@@ -444,7 +469,7 @@ export async function applyTargetMutations(target, upserts, removals) {
       delete section[name];
     }
     for (const [name, server] of Object.entries(upserts)) {
-      section[name] = serializeJsonEntry(server, target.format);
+      section[name] = serializeJsonEntry(server, target.format, section[name]);
     }
 
     const nextDoc = { ...doc, [rootKey]: section };

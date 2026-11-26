@@ -849,6 +849,34 @@ export function renderModal(ctx) {
         },
       }),
     ];
+  } else if (m.type === "view-config") {
+    title = `${m.targetName || m.targetId} · ${m.format === "codex-toml" ? "TOML" : "JSON"}`;
+    body = [
+      el("div", { className: "mh-path-readonly", style: "margin-top:0;margin-bottom:10px" }, [
+        el("span", { className: "mh-path-readonly-text", title: m.configPath, text: m.configPath }),
+      ]),
+      m.error ? el("div", { className: "mh-probe-bar is-err", style: "margin:0 0 10px", text: m.error }) : null,
+      m.exists && m.rawText
+        ? el("pre", { className: "mh-raw-code", text: m.rawText })
+        : el("div", { className: "mh-backup-empty", text: t("targetConfigEmpty") }),
+    ];
+    footer = [
+      m.exists && m.rawText
+        ? el("button", {
+            className: "mh-btn",
+            text: t("btnCopyContent"),
+            onClick: async () => {
+              try {
+                await navigator.clipboard.writeText(m.rawText);
+                showToast(t("btnCopied"));
+              } catch {
+                showToast(t("btnCopied"));
+              }
+            },
+          })
+        : null,
+      el("button", { className: "mh-btn mh-btn-primary", text: t("btnClose"), onClick: close }),
+    ];
   } else if (m.type === "confirm-restore") {
     title = t("btnRestore");
     body = [

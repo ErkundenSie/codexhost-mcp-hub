@@ -1307,3 +1307,142 @@ test("i18n dictionaries have 1:1 zh-CN/en key parity and all frontend t() calls 
   }
   assert.deepEqual(unknownKeys, [], `Undefined i18n keys referenced in page/: ${unknownKeys.join(", ")}`);
 });
+
+test("v2.5.0: copilot-json format (type:local + tools preservation), persistent auto-sync logs, target raw viewer, and stdio arg path probe", async () => {
+  const tmpRoot = await mkdtemp(path.join(os.tmpdir(), "mcp-hub-v250-"));
+  const fakeHome = path.join(tmpRoot, "home");
+  const dataDir = path.join(tmpRoot, "data");
+  await mkdir(path.join(fakeHome, ".copilot"), { recursive: true });
+  await mkdir(path.join(fakeHome, ".codex"), { recursive: true });
+
+  const copilotFile = path.join(fakeHome, ".copilot", "mcp-config.json");
+  const codexFile = path.join(fakeHome, ".codex", "config.toml");
+  const fakeScript = path.join(tmpRoot, "server-entry.js");
+  const missingScript = path.join(tmpRoot, "does-not-exist.js");
+  await writeFile(fakeScript, "// ok\n", "utf8");
+
+  // Seed Copilot with an existing entry that has custom `tools: ["read_only"]`
+  await writeFile(
+    copilotFile,
+    JSON.stringify(
+      {
+        mcpServers: {
+          custom_tools_mcp: {
+            type: "local",
+            command: process.execPath,
+            args: [fakeScript],
+            tools: ["read_only"],
+          },
+        },
+      },
+      null,
+      2,
+    ),
+    "utf8",
+  );
+  await writeFile(codexFile, '# Codex header\nmodel = "gpt-5"\n', "utf8");
+
+  const hub1 = createHubController({
+    dataDir,
+    readSettings: async () => ({ autoBackup: false, excludeBuiltinMcp: true }),
+    home: fakeHome,
+    platform: "win32",
+  });
+
+  try {
+    await hub1.importFromTarget({ sourceTargetId: "all" });
+
+    // 1. Add stdio + http MCPs targeting Copilot -> writes official type: "local"/"http" + tools: ["*"]
+    const ov1 = await hub1.saveServer({
+      name: "new_stdio",
+      enabled: true,
+      transport: { type: "stdio", command: process.execPath, args: [fakeScript] },
+      targets: ["copilot"],
+    });
+    const ov2 = await hub1.saveServer({
+      name: "new_remote",
+      enabled: true,
+      transport: { type: "http", url: "https://mcp.example.com/v1" },
+      targets: ["copilot"],
+    });
+    // Update existing `custom_tools_mcp` args while expecting custom `tools: ["read_only"]` to survive
+    const existingSrv = ov2.servers.find((s) => s.name === "custom_tools_mcp");
+    await hub1.saveServer({
+      id: existingSrv.id,
+      name: existingSrv.name,
+      enabled: true,
+      transport: { type: "stdio", command: process.execPath, args: [fakeScript, "--flag"] },
+      targets: ["copilot"],
+    });
+
+    await hub1.applySync();
+    const copilotAfter = JSON.parse(await readFile(copilotFile, "utf8"));
+    assert.equal(copilotAfter.mcpServers.new_stdio.type, "local");
+    assert.deepEqual(copilotAfter.mcpServers.new_stdio.tools, ["*"]);
+    assert.equal(copilotAfter.mcpServers.new_remote.type, "http");
+    assert.deepEqual(copilotAfter.mcpServers.new_remote.tools, ["*"]);
+    assert.equal(copilotAfter.mcpServers.custom_tools_mcp.type, "local");
+    assert.deepEqual(
+      copilotAfter.mcpServers.custom_tools_mcp.tools,
+      ["read_only"],
+      "Existing custom Copilot tools allowlist must be preserved on update",
+    );
+
+    // 2. Read raw config via targets/read-raw
+    const rawCodex = await hub1.readTargetRaw({ targetId: "codex" });
+    assert.equal(rawCodex.exists, true);
+    assert.ok(rawCodex.rawText.includes("# Codex header"));
+    await assert.rejects(() => hub1.readTargetRaw({ targetId: "nonexistent-target" }));
+
+    // 3. Persistent auto-sync logs survive controller restart
+    await hub1.setAutoSyncConfig({
+      enabled: true,
+      mode: "bidirectional",
+      targetIds: ["codex", "copilot"],
+      syncAdditions: true,
+      syncUpdates: true,
+    });
+    await writeFile(
+      codexFile,
+      '# Codex header\nmodel = "gpt-5"\n\n[mcp_servers.fresh_mcp]\nurl = "https://fresh.example.com/mcp"\n',
+      "utf8",
+    );
+    await hub1.handleWatchedTargetChange("codex");
+    hub1.dispose();
+
+    const hub2 = createHubController({
+      dataDir,
+      readSettings: async () => ({ autoBackup: false, excludeBuiltinMcp: true }),
+      home: fakeHome,
+      platform: "win32",
+    });
+    try {
+      const ovReloaded = await hub2.buildOverview();
+      assert.ok(
+        ovReloaded.autoSyncLogs.some((l) => l.mcpName === "fresh_mcp" && l.action === "add"),
+        "Auto-sync logs must persist across backend restarts",
+      );
+      await hub2.clearAutoSyncLogs();
+      const ovCleared = await hub2.buildOverview();
+      assert.equal(ovCleared.autoSyncLogs.length, 0);
+    } finally {
+      hub2.dispose();
+    }
+
+    // 4. Enhanced stdio probe checks local absolute file paths inside `args`
+    const probeOk = await hub1.probeServer({
+      server: { transport: { type: "stdio", command: process.execPath, args: [fakeScript] } },
+    });
+    assert.equal(probeOk.ok, true);
+    assert.ok(probeOk.detail.includes("1 local file(s) verified"));
+
+    const probeMissingArg = await hub1.probeServer({
+      server: { transport: { type: "stdio", command: process.execPath, args: ["--config", missingScript] } },
+    });
+    assert.equal(probeMissingArg.ok, false);
+    assert.ok(probeMissingArg.error.includes("Referenced file not found"));
+  } finally {
+    hub1.dispose();
+    await rm(tmpRoot, { recursive: true, force: true });
+  }
+});

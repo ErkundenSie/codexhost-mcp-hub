@@ -42,6 +42,19 @@ export function renderTargetsTab(ctx) {
           }),
           el("button", {
             className: "mh-btn mh-btn-sm",
+            text: t("targetViewConfig"),
+            onClick: async () => {
+              try {
+                const raw = await api.backend.invoke("targets/read-raw", { targetId: tg.id });
+                state.modal = { type: "view-config", ...raw };
+                render();
+              } catch (err) {
+                showToast(err instanceof Error ? err.message : String(err), true);
+              }
+            },
+          }),
+          el("button", {
+            className: "mh-btn mh-btn-sm",
             text: isEditing ? t("btnCancel") : t("targetEditPath"),
             onClick: () => {
               state.editingTargetPathId = isEditing ? null : tg.id;

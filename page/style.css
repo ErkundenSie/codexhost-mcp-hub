@@ -1036,6 +1036,22 @@
   word-break: break-all;
 }
 
+.mh-raw-code {
+  margin: 0;
+  padding: 12px 14px;
+  border-radius: 8px;
+  border: 1px solid var(--mh-divider);
+  background: var(--mh-surface-subtle);
+  color: var(--cx-page-text, #18181b);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.55;
+  max-height: 52vh;
+  overflow: auto;
+  white-space: pre;
+  tab-size: 2;
+}
+
 .mh-desc {
   font-size: 12.5px;
   color: var(--cx-page-text-muted, #656d76);

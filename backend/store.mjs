@@ -8,6 +8,7 @@ import path from "node:path";
 import { atomicWriteText } from "./adapters.mjs";
 
 const STATE_FILE = "hub-state.json";
+const AUTOSYNC_LOGS_FILE = "autosync-logs.json";
 const BACKUPS_DIR = "backups";
 const MAX_BACKUPS = 40;
 
@@ -65,7 +66,24 @@ export class HubStore {
   constructor(dataDir) {
     this.dataDir = dataDir;
     this.statePath = path.join(dataDir, STATE_FILE);
+    this.autoSyncLogsPath = path.join(dataDir, AUTOSYNC_LOGS_FILE);
     this.backupsDir = path.join(dataDir, BACKUPS_DIR);
+  }
+
+  async loadAutoSyncLogs() {
+    try {
+      const text = await readFile(this.autoSyncLogsPath, "utf8");
+      const parsed = JSON.parse(text);
+      return Array.isArray(parsed) ? parsed : [];
+    } catch {
+      return [];
+    }
+  }
+
+  async saveAutoSyncLogs(logs) {
+    const safe = Array.isArray(logs) ? logs : [];
+    await atomicWriteText(this.autoSyncLogsPath, JSON.stringify(safe, null, 2) + "\n");
+    return safe;
   }
 
   async load() {

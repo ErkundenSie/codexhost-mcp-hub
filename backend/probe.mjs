@@ -6,11 +6,19 @@
 import { access } from "node:fs/promises";
 import path from "node:path";
 
+function isLocalAbsolutePath(value) {
+  const s = String(value ?? "").trim();
+  if (!s || s.startsWith("-")) return false;
+  if (/^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(s)) return false;
+  if (/^[a-zA-Z]:[\\/]/.test(s)) return true;
+  return process.platform !== "win32" && path.isAbsolute(s) && s.length > 1;
+}
+
 /**
  * Probe a normalized MCP transport:
  *  - For `http` / `sse`: sends an MCP JSON-RPC `initialize` request (or GET fallback) within timeout.
- *  - For `stdio`: validates command structure & checks file existence if an absolute path is given.
- *    (Note: CodexHost backend child strips PATH, so short commands like `npx`/`uvx` are validated syntactically.)
+ *  - For `stdio`: validates command structure, checks executable existence if an absolute path is given,
+ *    and verifies any referenced local absolute script/config file paths in `args`.
  */
 export async function probeMcpServer(server, timeoutMs = 4000) {
   const t = server?.transport;
@@ -23,14 +31,10 @@ export async function probeMcpServer(server, timeoutMs = 4000) {
     if (!cmd) {
       return { ok: false, kind: "stdio", error: "Missing command" };
     }
-    if (path.isAbsolute(cmd)) {
+    const cmdIsAbs = path.isAbsolute(cmd);
+    if (cmdIsAbs) {
       try {
         await access(cmd);
-        return {
-          ok: true,
-          kind: "stdio",
-          detail: `Executable found at ${cmd}`,
-        };
       } catch {
         return {
           ok: false,
@@ -39,11 +43,34 @@ export async function probeMcpServer(server, timeoutMs = 4000) {
         };
       }
     }
+
+    const argPaths = (Array.isArray(t.args) ? t.args : []).filter((a) => isLocalAbsolutePath(a));
+    for (const argPath of argPaths) {
+      try {
+        await access(argPath);
+      } catch {
+        return {
+          ok: false,
+          kind: "stdio",
+          error: `Referenced file not found: ${argPath}`,
+        };
+      }
+    }
+
+    if (cmdIsAbs) {
+      const extra = argPaths.length > 0 ? ` (+ ${argPaths.length} local file(s) verified)` : "";
+      return {
+        ok: true,
+        kind: "stdio",
+        detail: `Executable found at ${cmd}${extra}`,
+      };
+    }
+    const extra = argPaths.length > 0 ? `; ${argPaths.length} local arg path(s) verified` : "";
     return {
       ok: true,
       kind: "stdio",
       warn: true,
-      detail: `Command "${cmd}" looks valid (resolved via each AI's shell PATH at runtime)`,
+      detail: `Command "${cmd}" looks valid (resolved via each AI's shell PATH at runtime${extra})`,
     };
   }
 
