@@ -42,7 +42,7 @@ test("manifest.json conforms to codexhost manifestVersion 2 contract and assets 
     assert.ok(buf.length <= 512 * 1024, `${s} must be <= 512 KiB`);
   }
 
-  // Ensure all frontend & shared modules obey CSP / Desktop linker rules
+  // Ensure all packaged modules obey CodexHost Registry static scan & CSP rules
   for (const rel of [
     manifest.page.entry,
     "page/dom.mjs",
@@ -53,11 +53,20 @@ test("manifest.json conforms to codexhost manifestVersion 2 contract and assets 
     "page/tabs/project-backups.mjs",
     "shared/models.mjs",
     "shared/i18n.mjs",
+    manifest.backend.entry,
+    "backend/adapters.mjs",
+    "backend/probe.mjs",
+    "backend/store.mjs",
+    "backend/toml.mjs",
+    "backend/watcher.mjs",
   ]) {
     const src = await readFile(path.join(rootDir, rel), "utf8");
-    assert.doesNotMatch(src, /\beval\s*\(/, `${rel} must not use eval()`);
-    assert.doesNotMatch(src, /\bnew\s+Function\s*\(/, `${rel} must not use new Function()`);
-    assert.doesNotMatch(src, /\bimport\s*\(/, `${rel} must not use dynamic import()`);
+    assert.doesNotMatch(src, /\beval\s*\(/u, `${rel} must not use eval()`);
+    assert.doesNotMatch(src, /\bnew\s+Function\b/u, `${rel} must not use new Function`);
+    assert.doesNotMatch(src, /\bchild_process\b/u, `${rel} must not reference child_process`);
+    if (!rel.startsWith("backend/")) {
+      assert.doesNotMatch(src, /\bimport\s*\(/, `${rel} must not use dynamic import()`);
+    }
   }
 });
 
@@ -1448,34 +1457,7 @@ test("v2.5.0: copilot-json format (type:local + tools preservation), persistent 
   }
 });
 
-test("v2.5.1: probeMcpServer reports toolCount & toolNames for Streamable HTTP (JSON + SSE + session) and stdio MCP handshakes", async () => {
-  const tmpRoot = await mkdtemp(path.join(os.tmpdir(), "mcp-hub-v251-"));
-  const mockStdioScript = path.join(tmpRoot, "mock-mcp-stdio.mjs");
-  await writeFile(
-    mockStdioScript,
-    [
-      'process.stdin.setEncoding("utf8");',
-      'let buf = "";',
-      'process.stdin.on("data", (chunk) => {',
-      '  buf += chunk;',
-      '  let idx;',
-      '  while ((idx = buf.indexOf("\\n")) !== -1) {',
-      '    const line = buf.slice(0, idx).trim();',
-      '    buf = buf.slice(idx + 1);',
-      '    if (!line) continue;',
-      '    const msg = JSON.parse(line);',
-      '    if (msg.method === "initialize") {',
-      '      process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id: msg.id, result: { protocolVersion: "2024-11-05", capabilities: { tools: {} }, serverInfo: { name: "mock" } } }) + "\\n");',
-      '    } else if (msg.method === "tools/list") {',
-      '      process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id: msg.id, result: { tools: [{ name: "alpha_tool" }, { name: "beta_tool" }, { name: "gamma_tool" }] } }) + "\\n");',
-      '    }',
-      '  }',
-      '});',
-    ].join("\n"),
-    "utf8",
-  );
-
-  // Ephemeral Streamable HTTP server supporting both JSON and SSE responses with mcp-session-id
+test("v2.5.2: probeMcpServer reports toolCount & toolNames for Streamable HTTP (JSON + SSE + session) without child_process", async () => {
   const httpServer = http.createServer((req, res) => {
     let raw = "";
     req.on("data", (c) => {
@@ -1522,16 +1504,7 @@ test("v2.5.1: probeMcpServer reports toolCount & toolNames for Streamable HTTP (
   const port = httpServer.address().port;
 
   try {
-    // 1. stdio real MCP handshake returns exact toolCount & toolNames
-    const stdioRes = await probeMcpServer(
-      { transport: { type: "stdio", command: process.execPath, args: [mockStdioScript] } },
-      4000,
-    );
-    assert.equal(stdioRes.ok, true);
-    assert.equal(stdioRes.toolCount, 3);
-    assert.deepEqual(stdioRes.toolNames, ["alpha_tool", "beta_tool", "gamma_tool"]);
-
-    // 2. Streamable HTTP JSON response with session header
+    // 1. Streamable HTTP JSON response with session header
     const httpJsonRes = await probeMcpServer(
       { transport: { type: "http", url: `http://127.0.0.1:${port}/mcp-json` } },
       4000,
@@ -1540,7 +1513,7 @@ test("v2.5.1: probeMcpServer reports toolCount & toolNames for Streamable HTTP (
     assert.equal(httpJsonRes.toolCount, 2);
     assert.deepEqual(httpJsonRes.toolNames, ["http_search", "http_fetch"]);
 
-    // 3. Streamable HTTP SSE-formatted response
+    // 2. Streamable HTTP SSE-formatted response
     const httpSseRes = await probeMcpServer(
       { transport: { type: "http", url: `http://127.0.0.1:${port}/mcp-sse` } },
       4000,
@@ -1550,6 +1523,5 @@ test("v2.5.1: probeMcpServer reports toolCount & toolNames for Streamable HTTP (
     assert.deepEqual(httpSseRes.toolNames, ["sse_tool_1"]);
   } finally {
     httpServer.close();
-    await rm(tmpRoot, { recursive: true, force: true });
   }
 });
