@@ -72,13 +72,33 @@ node --test test/hub.test.mjs
 
 ## 安装与更新
 
-1. 打开 CodexHost Desktop（**设置 → 插件**）或 CodexHost Web（左侧一级导航 **插件**）；
-2. 若已安装旧版 `mcp-hub`，请先卸载旧版（或通过插件详情更新）；
-3. 点击 **导入插件** 并上传打包好的 `dist/mcp-hub-2.3.2.zip`；
-4. 启用 **「MCP 统一中心」** 后，即可在顶部标签栏或「插件页面」打开配置页。
+### 方式一：通过 GitHub 链接直接安装（推荐）
 
-## 发布到 GitHub
+1. 打开 CodexHost Desktop（**设置 → 插件**）或 CodexHost Web（左侧导航 **插件**）；
+2. 点击右上角 **导入插件** → 切换到 **GitHub** 标签页；
+3. 在 **GitHub 仓库** 中填入：
+   ```text
+   ErkundenSie/codexhost-mcp-hub
+   ```
+   （或完整链接 `https://github.com/ErkundenSie/codexhost-mcp-hub`）
+4. 其余可选项全部**留空**即可（默认自动拉取最新 Release 的 `.zip` 资产），点击 **安装**；
+5. 安装完成后启用 **「MCP 统一中心」**，即可从顶部标签栏或「插件页面」进入配置页。
 
-1. 在 GitHub 推送本仓库源码（`dist/` 默认已忽略）；
-2. 运行 `node scripts/pack.mjs` 生成 `dist/mcp-hub-<version>.zip`；
-3. 创建 GitHub Release（例如 tag `v2.3.2`），将 `.zip` 作为 Release 资产上传，即可通过仓库链接或 `.zip` 分发给其他用户。
+### 方式二：下载 Release `.zip` 本地导入
+
+1. 前往 [Releases](https://github.com/ErkundenSie/codexhost-mcp-hub/releases/latest) 下载最新的 `mcp-hub-*.zip`；
+2. 在 CodexHost「插件中心」点击 **导入插件 → 本地 .zip** 上传安装并启用。
+
+> 若已安装旧版 `mcp-hub`，直接通过「导入插件」重新导入时请先卸载旧版，或在已安装插件详情页进行更新。
+
+## 发布新版本
+
+仓库已配置 GitHub Actions 自动发版工作流（`.github/workflows/release.yml`）：
+
+1. 更新 `manifest.json` 中的 `version` 并提交到 `main`；
+2. 推送对应版本标签：
+   ```bash
+   git tag -a v2.x.x -m "MCP Hub v2.x.x"
+   git push origin main --tags
+   ```
+3. GitHub Actions 会自动打包 `.zip`、运行单元测试并发布对应 Release。
