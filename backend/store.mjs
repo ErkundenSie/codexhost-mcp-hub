@@ -11,6 +11,42 @@ const STATE_FILE = "hub-state.json";
 const BACKUPS_DIR = "backups";
 const MAX_BACKUPS = 40;
 
+export function createDefaultAutoSync() {
+  return {
+    enabled: false,
+    mode: "bidirectional",
+    primaryTargetId: "",
+    updateScope: "existing-only",
+    mcpScope: "all",
+    selectedMcpNames: [],
+    targetIds: null,
+    syncAdditions: true,
+    syncUpdates: true,
+    syncRemovals: false,
+  };
+}
+
+export function normalizeAutoSyncConfig(raw) {
+  const base = createDefaultAutoSync();
+  if (!raw || typeof raw !== "object") return base;
+  return {
+    enabled: Boolean(raw.enabled),
+    mode: raw.mode === "primary" ? "primary" : "bidirectional",
+    primaryTargetId: typeof raw.primaryTargetId === "string" ? raw.primaryTargetId.trim() : "",
+    updateScope: raw.updateScope === "all-selected" ? "all-selected" : "existing-only",
+    mcpScope: raw.mcpScope === "selected" ? "selected" : "all",
+    selectedMcpNames: Array.isArray(raw.selectedMcpNames)
+      ? [...new Set(raw.selectedMcpNames.map((x) => String(x).trim()).filter(Boolean))]
+      : [],
+    targetIds: Array.isArray(raw.targetIds)
+      ? [...new Set(raw.targetIds.map((x) => String(x).trim()).filter(Boolean))]
+      : null,
+    syncAdditions: raw.syncAdditions !== false,
+    syncUpdates: raw.syncUpdates !== false,
+    syncRemovals: raw.syncRemovals === true,
+  };
+}
+
 export function createEmptyState() {
   return {
     version: 1,
@@ -20,6 +56,7 @@ export function createEmptyState() {
     customTargets: [],
     managedKeysByTarget: {},
     managedOwnersByTarget: {},
+    autoSync: createDefaultAutoSync(),
     lastSyncedAt: null,
   };
 }
@@ -53,6 +90,7 @@ export class HubStore {
           parsed.managedOwnersByTarget && typeof parsed.managedOwnersByTarget === "object"
             ? parsed.managedOwnersByTarget
             : {},
+        autoSync: normalizeAutoSyncConfig(parsed.autoSync),
         lastSyncedAt: typeof parsed.lastSyncedAt === "string" ? parsed.lastSyncedAt : null,
       };
     } catch {

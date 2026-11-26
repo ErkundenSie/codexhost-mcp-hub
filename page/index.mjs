@@ -9,6 +9,7 @@ import { createTranslator } from "../shared/i18n.mjs";
 import { toStandardMcpJson } from "../shared/models.mjs";
 import { el, formatKvLines } from "./dom.mjs";
 import { renderModal } from "./modals.mjs";
+import { renderAutoSyncTab } from "./tabs/autosync.mjs";
 import { renderProjectAndBackupsTab } from "./tabs/project-backups.mjs";
 import { renderServersTab } from "./tabs/servers.mjs";
 import { renderTargetsTab } from "./tabs/targets.mjs";
@@ -304,16 +305,18 @@ export async function mount(root, api) {
   function renderTabs() {
     const serverCount = (state.overview?.servers ?? []).length;
     const managedCount = managedTargets().length;
+    const autoSyncOn = Boolean(state.overview?.autoSync?.enabled);
     const tabs = [
-      ["servers", t("tabServers"), serverCount],
-      ["targets", t("tabTargets"), managedCount],
-      ["project-backups", t("tabProjectBackups"), null],
+      ["servers", t("tabServers"), serverCount, false],
+      ["targets", t("tabTargets"), managedCount, false],
+      ["autosync", t("tabAutoSync"), null, autoSyncOn],
+      ["project-backups", t("tabProjectBackups"), null, false],
     ];
     return el("div", { className: "mh-nav-bar" }, [
       el(
         "div",
         { className: "mh-seg-tabs", role: "tablist" },
-        tabs.map(([id, label, count]) =>
+        tabs.map(([id, label, count, showLiveDot]) =>
           el(
             "button",
             {
@@ -325,6 +328,7 @@ export async function mount(root, api) {
               },
             },
             [
+              showLiveDot ? el("span", { className: "mh-live-dot" }) : null,
               el("span", { text: label }),
               count !== null ? el("span", { className: "mh-seg-count", text: String(count) }) : null,
             ],
@@ -382,6 +386,7 @@ export async function mount(root, api) {
     let bodyContent;
     if (state.tab === "servers") bodyContent = renderServersTab(ctx);
     else if (state.tab === "targets") bodyContent = renderTargetsTab(ctx);
+    else if (state.tab === "autosync") bodyContent = renderAutoSyncTab(ctx);
     else bodyContent = renderProjectAndBackupsTab(ctx);
 
     const shell = el("div", { className: "mh-shell" }, [
@@ -397,10 +402,33 @@ export async function mount(root, api) {
     restoreFocusState(focusInfo);
   }
 
+  // Zero-I/O revision heartbeat so background auto-sync updates reflect automatically in UI
+  let pollInFlight = false;
+  const pollTimer = setInterval(async () => {
+    if (api.signal.aborted || pollInFlight || state.loading || state.syncing || state.modal || state.searchComposing) {
+      return;
+    }
+    const knownRev = state.overview?.revision ?? 0;
+    if (!knownRev) return;
+    pollInFlight = true;
+    try {
+      const res = await api.backend.invoke("overview/revision");
+      if (res && typeof res.revision === "number" && res.revision !== knownRev) {
+        await refreshOverview(true);
+      }
+    } catch {
+      // Ignore transient poll errors
+    } finally {
+      pollInFlight = false;
+    }
+  }, 2500);
+  api.signal.addEventListener("abort", () => clearInterval(pollTimer), { once: true });
+
   render();
   await refreshOverview(false);
 
   return () => {
+    clearInterval(pollTimer);
     unsubLocale();
     unsubTheme();
     root.replaceChildren();

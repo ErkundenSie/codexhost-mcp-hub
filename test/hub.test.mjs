@@ -45,6 +45,7 @@ test("manifest.json conforms to codexhost manifestVersion 2 contract and assets 
     "page/modals.mjs",
     "page/tabs/servers.mjs",
     "page/tabs/targets.mjs",
+    "page/tabs/autosync.mjs",
     "page/tabs/project-backups.mjs",
     "shared/models.mjs",
     "shared/i18n.mjs",
@@ -822,9 +823,11 @@ test("packed dist zip passes CodexHost ZIP structure and CRC verification", asyn
   assert.ok(names.has("page/modals.mjs"));
   assert.ok(names.has("page/tabs/servers.mjs"));
   assert.ok(names.has("page/tabs/targets.mjs"));
+  assert.ok(names.has("page/tabs/autosync.mjs"));
   assert.ok(names.has("page/tabs/project-backups.mjs"));
   assert.equal(names.has("widget/index.mjs"), false);
   assert.ok(names.has("backend/index.mjs"));
+  assert.ok(names.has("backend/watcher.mjs"));
   assert.ok(names.has("assets/icon.png"));
   assert.ok(names.has("assets/preview.png"));
 });
@@ -894,6 +897,178 @@ test("v2.3.0 regression checks: unique same-ms backups, custom target owner clea
     assert.equal(rawState.managedKeysByTarget[customTarget.id], undefined);
     assert.equal(rawState.managedOwnersByTarget[customTarget.id], undefined);
   } finally {
+    await rm(tmpRoot, { recursive: true, force: true });
+  }
+});
+
+test("v2.4.0 auto-sync: existing-only scope, selected MCP filter, primary mode, builtin guard, and mass-wipe breaker", async () => {
+  const tmpRoot = await mkdtemp(path.join(os.tmpdir(), "mcp-hub-v240-"));
+  const fakeHome = path.join(tmpRoot, "home");
+  const dataDir = path.join(tmpRoot, "data");
+  await mkdir(path.join(fakeHome, ".codex"), { recursive: true });
+  await mkdir(path.join(fakeHome, ".cursor"), { recursive: true });
+  await mkdir(path.join(fakeHome, ".pi", "agent"), { recursive: true });
+
+  const codexFile = path.join(fakeHome, ".codex", "config.toml");
+  const cursorFile = path.join(fakeHome, ".cursor", "mcp.json");
+  const piFile = path.join(fakeHome, ".pi", "agent", "mcp.json");
+
+  await writeFile(
+    codexFile,
+    [
+      "[mcp_servers.notion]",
+      'url = "https://mcp.notion.com/mcp"',
+      "",
+      "[mcp_servers.ssh-mcp]",
+      'command = "node"',
+      'args = ["ssh-v1.mjs"]',
+      "",
+    ].join("\n"),
+    "utf8",
+  );
+  // Cursor has BOTH notion and ssh-mcp; Pi ONLY has ssh-mcp (no notion)
+  await writeFile(
+    cursorFile,
+    JSON.stringify(
+      {
+        mcpServers: {
+          notion: { url: "https://mcp.notion.com/mcp" },
+          "ssh-mcp": { command: "node", args: ["ssh-v1.mjs"] },
+        },
+      },
+      null,
+      2,
+    ),
+    "utf8",
+  );
+  await writeFile(
+    piFile,
+    JSON.stringify(
+      {
+        mcpServers: {
+          "ssh-mcp": { command: "node", args: ["ssh-v1.mjs"] },
+        },
+      },
+      null,
+      2,
+    ),
+    "utf8",
+  );
+
+  const hub = createHubController({
+    dataDir,
+    readSettings: async () => ({ autoBackup: true, excludeBuiltinMcp: true }),
+    home: fakeHome,
+    platform: "win32",
+    watchDebounceMs: 80,
+  });
+
+  try {
+    await hub.importFromTarget({ sourceTargetId: "all" });
+
+    // Enable bidirectional auto-sync with existing-only updateScope & all MCPs
+    await hub.setAutoSyncConfig({
+      enabled: true,
+      mode: "bidirectional",
+      updateScope: "existing-only",
+      mcpScope: "all",
+      targetIds: ["codex", "cursor", "pi"],
+      syncAdditions: true,
+      syncUpdates: true,
+      syncRemovals: false,
+    });
+
+    // 1. Edit `notion` in Codex -> should update Cursor (already has notion), NOT install into Pi!
+    await writeFile(
+      codexFile,
+      [
+        "[mcp_servers.notion]",
+        'url = "https://mcp.notion.com/mcp-v2"',
+        "",
+        "[mcp_servers.ssh-mcp]",
+        'command = "node"',
+        'args = ["ssh-v1.mjs"]',
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+    const res1 = await hub.handleWatchedTargetChange("codex");
+    assert.equal(res1.propagated, 1);
+
+    const cursorAfter1 = JSON.parse(await readFile(cursorFile, "utf8"));
+    const piAfter1 = JSON.parse(await readFile(piFile, "utf8"));
+    assert.equal(cursorAfter1.mcpServers.notion.url, "https://mcp.notion.com/mcp-v2");
+    assert.equal(piAfter1.mcpServers.notion, undefined, "existing-only must NOT add notion to Pi");
+
+    // 2. Restrict mcpScope to ONLY `notion` -> editing `ssh-mcp` in Codex must NOT propagate
+    await hub.setAutoSyncConfig({ mcpScope: "selected", selectedMcpNames: ["notion"] });
+    await writeFile(
+      codexFile,
+      [
+        "[mcp_servers.notion]",
+        'url = "https://mcp.notion.com/mcp-v2"',
+        "",
+        "[mcp_servers.ssh-mcp]",
+        'command = "node"',
+        'args = ["ssh-v2.mjs"]',
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+    const res2 = await hub.handleWatchedTargetChange("codex");
+    assert.equal(res2.propagated, 0);
+    const cursorAfter2 = JSON.parse(await readFile(cursorFile, "utf8"));
+    assert.deepEqual(cursorAfter2.mcpServers["ssh-mcp"].args, ["ssh-v1.mjs"]);
+
+    // 3. Primary mode (codex) -> editing `notion` in Cursor must NOT propagate back to Codex
+    await hub.setAutoSyncConfig({ mode: "primary", primaryTargetId: "codex", mcpScope: "all" });
+    cursorAfter2.mcpServers.notion.url = "https://mcp.notion.com/cursor-only";
+    await writeFile(cursorFile, JSON.stringify(cursorAfter2, null, 2), "utf8");
+    const res3 = await hub.handleWatchedTargetChange("cursor");
+    assert.equal(res3.propagated, 0);
+    const codexAfter3 = parseCodexMcpServers(await readFile(codexFile, "utf8"));
+    assert.equal(codexAfter3.notion.transport.url, "https://mcp.notion.com/mcp-v2");
+
+    // 4. Add a new MCP `figma` AND vendor builtin `node_repl` in Codex -> figma propagates, node_repl is skipped
+    await writeFile(
+      codexFile,
+      [
+        "[mcp_servers.notion]",
+        'url = "https://mcp.notion.com/mcp-v2"',
+        "",
+        "[mcp_servers.ssh-mcp]",
+        'command = "node"',
+        'args = ["ssh-v2.mjs"]',
+        "",
+        "[mcp_servers.figma]",
+        'url = "https://mcp.figma.com/mcp"',
+        "",
+        "[mcp_servers.node_repl]",
+        'command = "C:\\\\Program Files\\\\WindowsApps\\\\OpenAI.Codex_26.1\\\\app\\\\resources\\\\cua_node\\\\bin\\\\node_repl.exe"',
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+    const res4 = await hub.handleWatchedTargetChange("codex");
+    assert.equal(res4.propagated, 2);
+    const piAfter4 = JSON.parse(await readFile(piFile, "utf8"));
+    assert.equal(piAfter4.mcpServers.figma.url, "https://mcp.figma.com/mcp");
+    assert.equal(piAfter4.mcpServers.node_repl, undefined, "Builtin node_repl must never propagate");
+
+    // 5. Broken JSON in Cursor is blocked cleanly without throwing or overwriting peers
+    await hub.setAutoSyncConfig({ mode: "bidirectional", syncRemovals: true });
+    await writeFile(cursorFile, "{ broken json !!!", "utf8");
+    const resBroken = await hub.handleWatchedTargetChange("cursor");
+    assert.equal(resBroken.blocked, "parse-error");
+
+    // 6. Mass-wipe circuit breaker: emptying all MCPs in Codex at once must be blocked
+    await writeFile(codexFile, '# wiped\nmodel = "gpt-5"\n', "utf8");
+    const resWipe = await hub.handleWatchedTargetChange("codex");
+    assert.equal(resWipe.blocked, "mass-wipe-guard");
+    const piAfterWipe = JSON.parse(await readFile(piFile, "utf8"));
+    assert.ok(piAfterWipe.mcpServers.figma, "Mass-wipe guard must protect peer AIs");
+  } finally {
+    hub.dispose();
     await rm(tmpRoot, { recursive: true, force: true });
   }
 });

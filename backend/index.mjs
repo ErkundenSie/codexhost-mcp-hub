@@ -22,9 +22,18 @@ import {
   readTargetConfig,
 } from "./adapters.mjs";
 import { probeMcpServer } from "./probe.mjs";
-import { HubStore } from "./store.mjs";
+import { HubStore, normalizeAutoSyncConfig } from "./store.mjs";
+import { McpFileWatcher } from "./watcher.mjs";
 
-export function createHubController({ dataDir, readSettings, home = os.homedir(), platform = process.platform }) {
+const MAX_AUTOSYNC_LOGS = 40;
+
+export function createHubController({
+  dataDir,
+  readSettings,
+  home = os.homedir(),
+  platform = process.platform,
+  watchDebounceMs = 750,
+}) {
   const store = new HubStore(dataDir);
   let mutex = Promise.resolve();
   const serialize = (fn) => {
@@ -32,6 +41,99 @@ export function createHubController({ dataDir, readSettings, home = os.homedir()
     mutex = next.then(() => undefined, () => undefined);
     return next;
   };
+
+  let revision = 1;
+  /** @type {Map<string, Map<string, { sig: string, enabled: boolean, transport: object }>>} */
+  const baselineByTarget = new Map();
+  /** @type {Array<object>} */
+  let autoSyncLogs = [];
+
+  const watcher = new McpFileWatcher({
+    debounceMs: watchDebounceMs,
+    onTargetChanged: (targetId) => handleWatchedTargetChange(targetId),
+  });
+
+  function pushAutoSyncLog(entry) {
+    autoSyncLogs = [
+      {
+        id: randomUUID().slice(0, 8),
+        at: new Date().toISOString(),
+        ...entry,
+      },
+      ...autoSyncLogs,
+    ].slice(0, MAX_AUTOSYNC_LOGS);
+  }
+
+  function makeNativeSnapshot(serversMap) {
+    const snap = new Map();
+    for (const [name, srv] of Object.entries(serversMap ?? {})) {
+      if (!srv || !srv.transport) continue;
+      snap.set(name, {
+        sig: transportSignature(srv.transport),
+        enabled: srv.enabled !== false,
+        transport: srv.transport,
+        isBuiltin: detectBuiltinMcp(name, srv.transport).isBuiltin,
+        isLoopback: isCodexhostLoopbackServer(name, srv.transport),
+      });
+    }
+    return snap;
+  }
+
+  function resolveAutoSyncView(state, scannedTargets) {
+    const cfg = normalizeAutoSyncConfig(state.autoSync);
+    const activeIds = scannedTargets.filter((t) => t.enabled).map((t) => t.id);
+    const activeSet = new Set(activeIds);
+    const targetIds =
+      cfg.targetIds === null
+        ? activeIds
+        : cfg.targetIds.filter((id) => activeSet.has(id));
+    const primaryTargetId =
+      cfg.primaryTargetId && activeSet.has(cfg.primaryTargetId)
+        ? cfg.primaryTargetId
+        : targetIds[0] || activeIds[0] || "";
+    return {
+      ...cfg,
+      targetIds,
+      primaryTargetId,
+      watchingCount: cfg.enabled ? watcher.dirWatchers.size : 0,
+    };
+  }
+
+  async function refreshBaselineForTarget(target) {
+    const fresh = await readTargetConfig(target);
+    if (!fresh.error) {
+      baselineByTarget.set(target.id, makeNativeSnapshot(fresh.servers));
+    }
+  }
+
+  async function writeTargetSafe(target, upserts, removals) {
+    watcher.markSelfWrite(target.id, 1800);
+    const res = await applyTargetMutations(target, upserts, removals);
+    await refreshBaselineForTarget(target);
+    watcher.markSelfWrite(target.id, 1800);
+    revision++;
+    return res;
+  }
+
+  async function syncWatchers(state, scannedTargets) {
+    const cfg = resolveAutoSyncView(state, scannedTargets);
+    if (!cfg.enabled) {
+      watcher.stopAll();
+      return;
+    }
+    const watchSet = new Set(cfg.targetIds);
+    if (cfg.mode === "primary" && cfg.primaryTargetId) {
+      watchSet.add(cfg.primaryTargetId);
+    }
+    const toWatch = scannedTargets.filter((t) => watchSet.has(t.id));
+    for (const tg of toWatch) {
+      if (!baselineByTarget.has(tg.id)) {
+        const byName = Object.fromEntries((tg.nativeServers ?? []).map((ns) => [ns.name, ns]));
+        baselineByTarget.set(tg.id, makeNativeSnapshot(byName));
+      }
+    }
+    watcher.setTargets(toWatch);
+  }
 
   function resolveTargets(state) {
     const builtins = getBuiltinTargets(home, platform).map((t) => ({
@@ -389,16 +491,20 @@ export function createHubController({ dataDir, readSettings, home = os.homedir()
       0,
     );
     const { candidates: importCandidates, excludedBuiltins } = buildImportCandidates(state, targets);
+    const autoSync = resolveAutoSyncView(state, targets);
 
     return {
       homeDir: home,
       platform,
       dataDir,
+      revision,
       servers: enrichedServers,
       targets,
       diffs,
       importCandidates,
       excludedBuiltins,
+      autoSync,
+      autoSyncLogs,
       summary: {
         totalServers: state.servers.length,
         enabledServers: state.servers.filter((s) => s.enabled).length,
@@ -581,10 +687,10 @@ export function createHubController({ dataDir, readSettings, home = os.homedir()
           }
 
           if (action === "remove") {
-            await applyTargetMutations(target, {}, [server.name]);
+            await writeTargetSafe(target, {}, [server.name]);
             clearManagedOwner(state, target.id, server.name);
           } else {
-            await applyTargetMutations(target, { [server.name]: server }, []);
+            await writeTargetSafe(target, { [server.name]: server }, []);
             releaseSiblingTargetClaims(state, server, target.id);
             setManagedOwner(state, target.id, server.name, server.id);
           }
@@ -721,7 +827,7 @@ export function createHubController({ dataDir, readSettings, home = os.homedir()
           if (targetScan.exists) {
             await backupTargetIfNeeded(target, autoBackup);
           }
-          await applyTargetMutations(target, upserts, removals);
+          await writeTargetSafe(target, upserts, removals);
           for (const name of removals) clearManagedOwner(state, target.id, name);
           for (const [name, srv] of Object.entries(upserts)) {
             releaseSiblingTargetClaims(state, srv, target.id);
@@ -1064,7 +1170,7 @@ export function createHubController({ dataDir, readSettings, home = os.homedir()
             await backupTargetIfNeeded(target, autoBackup);
           }
 
-          await applyTargetMutations(target, upserts, diff.removes);
+          await writeTargetSafe(target, upserts, diff.removes);
 
           for (const name of diff.removes) clearManagedOwner(state, target.id, name);
           for (const [name, srv] of Object.entries(diff.desired)) {
@@ -1262,13 +1368,381 @@ export function createHubController({ dataDir, readSettings, home = os.homedir()
 
   async function restoreBackup({ backupId }) {
     return serialize(async () => {
+      const state = await store.load();
+      const targetMatch = resolveTargets(state).find((t) =>
+        store.backupsDir && backupId.includes(t.id.replace(/[^a-zA-Z0-9_-]/g, "_")),
+      );
+      if (targetMatch) watcher.markSelfWrite(targetMatch.id, 1800);
       const meta = await store.restoreBackup(backupId);
+      const restoredTarget = resolveTargets(state).find((t) => t.id === meta.targetId);
+      if (restoredTarget) {
+        await refreshBaselineForTarget(restoredTarget);
+        watcher.markSelfWrite(restoredTarget.id, 1800);
+      }
+      revision++;
       return { restored: meta, overview: await buildOverview() };
     });
   }
 
+  async function handleWatchedTargetChange(sourceTargetId) {
+    return serialize(async () => {
+      const state = await store.load();
+      const scanned = await scanTargets(state);
+      const cfg = resolveAutoSyncView(state, scanned);
+      if (!cfg.enabled) return { propagated: 0 };
+
+      const targets = resolveTargets(state);
+      const targetById = new Map(targets.map((t) => [t.id, t]));
+      const scanById = new Map(scanned.map((t) => [t.id, t]));
+      const sourceTarget = targetById.get(sourceTargetId);
+      if (!sourceTarget) return { propagated: 0 };
+
+      const fresh = await readTargetConfig(sourceTarget);
+      if (fresh.error) {
+        pushAutoSyncLog({
+          action: "blocked",
+          mcpName: "*",
+          sourceTargetId,
+          sourceName: sourceTarget.shortName || sourceTarget.name,
+          destNames: [],
+          status: "blocked",
+          detail: fresh.error,
+        });
+        revision++;
+        return { propagated: 0, blocked: "parse-error" };
+      }
+
+      const nextSnap = makeNativeSnapshot(fresh.servers);
+      const prevSnap = baselineByTarget.get(sourceTargetId);
+      if (!prevSnap) {
+        baselineByTarget.set(sourceTargetId, nextSnap);
+        return { propagated: 0 };
+      }
+
+      const added = [];
+      const updated = [];
+      const removed = [];
+      const skippedProtected = [];
+
+      for (const [name, cur] of nextSnap.entries()) {
+        const prev = prevSnap.get(name);
+        if (!prev) {
+          if (cur.isBuiltin || cur.isLoopback) {
+            skippedProtected.push({ name, reason: cur.isBuiltin ? "builtin" : "loopback" });
+          } else {
+            added.push({ name, entry: cur });
+          }
+        } else if (cur.sig !== prev.sig || cur.enabled !== prev.enabled) {
+          if (cur.isBuiltin || cur.isLoopback) {
+            skippedProtected.push({ name, reason: cur.isBuiltin ? "builtin" : "loopback" });
+          } else {
+            updated.push({ name, entry: cur, prev });
+          }
+        }
+      }
+
+      for (const [name, prev] of prevSnap.entries()) {
+        if (!nextSnap.has(name) && !prev.isBuiltin && !prev.isLoopback) {
+          removed.push({ name, prev });
+        }
+      }
+
+      const totalChanges = added.length + updated.length + removed.length + skippedProtected.length;
+      if (totalChanges === 0) {
+        return { propagated: 0 };
+      }
+
+      // Update baseline immediately so late OS events won't re-trigger
+      baselineByTarget.set(sourceTargetId, nextSnap);
+      revision++;
+
+      for (const sk of skippedProtected) {
+        pushAutoSyncLog({
+          action: "skip",
+          mcpName: sk.name,
+          sourceTargetId,
+          sourceName: sourceTarget.shortName || sourceTarget.name,
+          destNames: [],
+          status: "protected",
+          detail: sk.reason,
+        });
+      }
+
+      // Mass-wipe circuit breaker: refuse to broadcast if >=2 managed MCPs vanished all at once
+      const prevNonBuiltinCount = [...prevSnap.values()].filter((x) => !x.isBuiltin && !x.isLoopback).length;
+      const nextNonBuiltinCount = [...nextSnap.values()].filter((x) => !x.isBuiltin && !x.isLoopback).length;
+      if (prevNonBuiltinCount >= 2 && nextNonBuiltinCount === 0 && removed.length >= 2) {
+        pushAutoSyncLog({
+          action: "blocked",
+          mcpName: "*",
+          sourceTargetId,
+          sourceName: sourceTarget.shortName || sourceTarget.name,
+          destNames: [],
+          status: "blocked",
+          detail: "mass-wipe-guard",
+        });
+        return { propagated: 0, blocked: "mass-wipe-guard" };
+      }
+
+      // Check whether this source is allowed to trigger propagation
+      const allowedSource =
+        cfg.mode === "primary"
+          ? sourceTargetId === cfg.primaryTargetId
+          : cfg.targetIds.includes(sourceTargetId);
+      if (!allowedSource) {
+        return { propagated: 0 };
+      }
+
+      const settings = await readSettings();
+      const autoBackup = settings.autoBackup !== false;
+      const now = new Date().toISOString();
+      const mcpAllowSet = cfg.mcpScope === "selected" ? new Set(cfg.selectedMcpNames) : null;
+      const candidateDestIds = cfg.targetIds.filter((id) => id !== sourceTargetId);
+
+      let propagated = 0;
+      let stateDirty = false;
+
+      const findOrCreateHubServer = (name, entry, prevSig) => {
+        const ownerId = getManagedOwnerId(state, sourceTargetId, name);
+        let srv = ownerId ? state.servers.find((s) => s.id === ownerId) : null;
+        if (!srv && prevSig) {
+          srv = state.servers.find((s) => s.name === name && transportSignature(s.transport) === prevSig);
+        }
+        if (!srv) {
+          const sameName = state.servers.filter((s) => s.name === name);
+          if (sameName.length === 1) srv = sameName[0];
+        }
+        if (srv) {
+          srv.transport = entry.transport;
+          srv.enabled = entry.enabled !== false;
+          srv.targets = [...new Set([...(srv.targets ?? []), sourceTargetId])];
+          srv.isLoopback = isCodexhostLoopbackServer(name, entry.transport);
+          srv.updatedAt = now;
+        } else {
+          srv = {
+            id: randomUUID(),
+            name,
+            alias: "",
+            autoAlias: false,
+            description: "",
+            enabled: entry.enabled !== false,
+            transport: entry.transport,
+            targets: [sourceTargetId],
+            isLoopback: isCodexhostLoopbackServer(name, entry.transport),
+            createdAt: now,
+            updatedAt: now,
+          };
+          state.servers.push(srv);
+        }
+        setManagedOwner(state, sourceTargetId, name, srv.id);
+        stateDirty = true;
+        return srv;
+      };
+
+      // 1. Propagate additions
+      if (cfg.syncAdditions) {
+        for (const { name, entry } of added) {
+          if (mcpAllowSet && !mcpAllowSet.has(name)) continue;
+          const hubSrv = findOrCreateHubServer(name, entry, null);
+          const destNames = [];
+          for (const destId of candidateDestIds) {
+            const destTarget = targetById.get(destId);
+            const destScan = scanById.get(destId);
+            if (!destTarget || !destScan || destScan.error) continue;
+            const destNative = destScan.nativeServers.find((ns) => ns.name === name);
+            if (destNative) {
+              // Do not clobber an existing differently-configured same-name MCP on add
+              continue;
+            }
+            try {
+              if (destScan.exists) await backupTargetIfNeeded(destTarget, autoBackup);
+              await writeTargetSafe(destTarget, { [name]: hubSrv }, []);
+              setManagedOwner(state, destId, name, hubSrv.id);
+              hubSrv.targets = [...new Set([...(hubSrv.targets ?? []), destId])];
+              destNames.push(destTarget.shortName || destTarget.name);
+              propagated++;
+              stateDirty = true;
+            } catch {
+              // Skip failing target without stopping other targets
+            }
+          }
+          if (destNames.length > 0) {
+            pushAutoSyncLog({
+              action: "add",
+              mcpName: name,
+              sourceTargetId,
+              sourceName: sourceTarget.shortName || sourceTarget.name,
+              destNames,
+              status: "synced",
+              detail: "",
+            });
+          }
+        }
+      }
+
+      // 2. Propagate updates
+      if (cfg.syncUpdates) {
+        for (const { name, entry, prev } of updated) {
+          if (mcpAllowSet && !mcpAllowSet.has(name)) continue;
+          const hubSrv = findOrCreateHubServer(name, entry, prev.sig);
+          const destNames = [];
+          for (const destId of candidateDestIds) {
+            const destTarget = targetById.get(destId);
+            const destScan = scanById.get(destId);
+            if (!destTarget || !destScan || destScan.error) continue;
+            const destNative = destScan.nativeServers.find((ns) => ns.name === name);
+            const destOwnerId = getManagedOwnerId(state, destId, name);
+            // Respect intentional same-name variant isolation
+            if (destOwnerId && destOwnerId !== hubSrv.id) continue;
+            if (cfg.updateScope === "existing-only") {
+              const hasExisting = Boolean(destNative) || (hubSrv.targets ?? []).includes(destId);
+              if (!hasExisting) continue;
+            }
+            if (
+              destNative &&
+              destNative.enabled !== false &&
+              transportSignature(destNative.transport) === entry.sig
+            ) {
+              continue;
+            }
+            try {
+              if (destScan.exists) await backupTargetIfNeeded(destTarget, autoBackup);
+              await writeTargetSafe(destTarget, { [name]: hubSrv }, []);
+              setManagedOwner(state, destId, name, hubSrv.id);
+              hubSrv.targets = [...new Set([...(hubSrv.targets ?? []), destId])];
+              destNames.push(destTarget.shortName || destTarget.name);
+              propagated++;
+              stateDirty = true;
+            } catch {
+              // Skip failing target without stopping other targets
+            }
+          }
+          if (destNames.length > 0) {
+            pushAutoSyncLog({
+              action: "update",
+              mcpName: name,
+              sourceTargetId,
+              sourceName: sourceTarget.shortName || sourceTarget.name,
+              destNames,
+              status: "synced",
+              detail: cfg.updateScope === "existing-only" ? "existing-only" : "all-selected",
+            });
+          }
+        }
+      }
+
+      // 3. Propagate removals (only when explicitly enabled by user)
+      if (cfg.syncRemovals) {
+        for (const { name, prev } of removed) {
+          if (mcpAllowSet && !mcpAllowSet.has(name)) continue;
+          const ownerId = getManagedOwnerId(state, sourceTargetId, name);
+          const hubSrv =
+            (ownerId ? state.servers.find((s) => s.id === ownerId) : null) ||
+            state.servers.find((s) => s.name === name && transportSignature(s.transport) === prev.sig) ||
+            null;
+          clearManagedOwner(state, sourceTargetId, name);
+          if (hubSrv) {
+            hubSrv.targets = (hubSrv.targets ?? []).filter((id) => id !== sourceTargetId);
+            stateDirty = true;
+          }
+          const destNames = [];
+          for (const destId of candidateDestIds) {
+            const destTarget = targetById.get(destId);
+            const destScan = scanById.get(destId);
+            if (!destTarget || !destScan || destScan.error) continue;
+            const destNative = destScan.nativeServers.find((ns) => ns.name === name);
+            if (!destNative) continue;
+            if (
+              destNative.isBuiltin &&
+              (!destNative.builtinOwnerTargetId || destNative.builtinOwnerTargetId === destId)
+            ) {
+              continue;
+            }
+            const destOwnerId = getManagedOwnerId(state, destId, name);
+            if (hubSrv && destOwnerId && destOwnerId !== hubSrv.id) continue;
+            try {
+              if (destScan.exists) await backupTargetIfNeeded(destTarget, autoBackup);
+              await writeTargetSafe(destTarget, {}, [name]);
+              clearManagedOwner(state, destId, name);
+              if (hubSrv) {
+                hubSrv.targets = (hubSrv.targets ?? []).filter((id) => id !== destId);
+              }
+              destNames.push(destTarget.shortName || destTarget.name);
+              propagated++;
+              stateDirty = true;
+            } catch {
+              // Skip failing target
+            }
+          }
+          if (destNames.length > 0) {
+            pushAutoSyncLog({
+              action: "remove",
+              mcpName: name,
+              sourceTargetId,
+              sourceName: sourceTarget.shortName || sourceTarget.name,
+              destNames,
+              status: "synced",
+              detail: "",
+            });
+          }
+        }
+      }
+
+      if (stateDirty) {
+        if (propagated > 0) state.lastSyncedAt = now;
+        await store.save(state);
+        revision++;
+      }
+      return { propagated };
+    });
+  }
+
+  async function initAutoSync() {
+    const state = await store.load();
+    const scanned = await scanTargets(state);
+    await syncWatchers(state, scanned);
+  }
+
+  async function setAutoSyncConfig(patch) {
+    return serialize(async () => {
+      const state = await store.load();
+      const prev = normalizeAutoSyncConfig(state.autoSync);
+      const next = normalizeAutoSyncConfig({ ...prev, ...(patch ?? {}) });
+      state.autoSync = next;
+      await store.save(state);
+      const scanned = await scanTargets(state);
+      // Reset baselines when enabling so existing differences never burst-sync
+      if (next.enabled && !prev.enabled) {
+        baselineByTarget.clear();
+      }
+      await syncWatchers(state, scanned);
+      revision++;
+      return buildOverview();
+    });
+  }
+
+  async function clearAutoSyncLogs() {
+    autoSyncLogs = [];
+    revision++;
+    return { ok: true, revision };
+  }
+
+  function getRevision() {
+    return { revision };
+  }
+
+  function dispose() {
+    watcher.dispose();
+  }
+
   return {
     buildOverview,
+    initAutoSync,
+    setAutoSyncConfig,
+    clearAutoSyncLogs,
+    getRevision,
+    handleWatchedTargetChange,
+    dispose,
     saveServer,
     deleteServer,
     toggleServer,
@@ -1298,8 +1772,12 @@ export async function activate(ctx) {
     dataDir: ctx.dataDir,
     readSettings: () => ctx.readSettings(),
   });
+  await controller.initAutoSync();
 
   ctx.handle("overview", () => controller.buildOverview());
+  ctx.handle("overview/revision", () => controller.getRevision());
+  ctx.handle("autosync/set-config", (params) => controller.setAutoSyncConfig(params ?? {}));
+  ctx.handle("autosync/clear-logs", () => controller.clearAutoSyncLogs());
   ctx.handle("servers/save", (params) => controller.saveServer(params));
   ctx.handle("servers/delete", (params) => controller.deleteServer(params ?? {}));
   ctx.handle("servers/toggle", (params) => controller.toggleServer(params ?? {}));
@@ -1323,6 +1801,6 @@ export async function activate(ctx) {
   ctx.handle("backups/restore", (params) => controller.restoreBackup(params ?? {}));
 
   return () => {
-    // No persistent timers or file watchers to dispose.
+    controller.dispose();
   };
 }

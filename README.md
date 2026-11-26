@@ -9,6 +9,7 @@
 ## 核心功能
 
 - **自动扫描 16 家本机 AI**：自动检测并读取 Codex、Pi、Claude Code、Antigravity (`agy`)、Grok、Cursor / Cursor CLI、GitHub Copilot CLI、CodeBuddy、Claude Desktop、OpenCode、Qwen Code、Gemini CLI、Kiro CLI、Kimi Code、WorkBuddy、Qoder 等原生 MCP 配置，并支持自定义路径与自定义 JSON 目标。
+- **实时自动同步（可选）**：监听本机 AI 配置文件变化，支持「双向同步 / 主源同步」、「仅同步到已有该 MCP 的 AI / 广播到全部已选 AI」、按指定 MCP 过滤、整文件清空/语法损坏熔断保护与实时同步日志。
 - **快速配置向导 & 卡片单条应用**：
   - 顶部「快速配置」两步向导：默认全选 MCP → 选择目标 AI 与覆盖保护 → 一键批量添加或移除；
   - 单条 MCP 卡片内直接勾选/取消各家 AI，卡片底部「撤销 / 应用」即时写入该条 MCP，互不干扰。
@@ -40,11 +41,13 @@ codexhost-mcp-hub/
 │   ├── tabs/
 │   │   ├── servers.mjs           # MCP 列表标签页
 │   │   ├── targets.mjs           # AI 配置标签页
+│   │   ├── autosync.mjs          # 实时自动同步标签页
 │   │   └── project-backups.mjs   # 项目与备份标签页
 │   └── style.css                 # 使用 --cx-page-* 主题变量（支持浅/深色）
 ├── backend/
 │   ├── index.mjs                 # 共享 Host 单实例 Node 后端入口 (activate)
 │   ├── adapters.mjs              # 16 家内置 AI + 自定义目标 + 项目级适配器
+│   ├── watcher.mjs               # 父目录级 fs.watch 防抖监听与自写抑制器
 │   ├── toml.mjs                  # Codex / Grok TOML 注释保留型局部更新器
 │   ├── store.mjs                 # 中心库持久化与自动备份管理
 │   └── probe.mjs                 # HTTP/SSE 连通性测试与 stdio 校验
