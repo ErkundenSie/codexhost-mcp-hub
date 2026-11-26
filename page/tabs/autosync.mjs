@@ -3,20 +3,7 @@
  * fluid AI pill chips + MCP filter scope card, and live activity logs.
  */
 
-import { el } from "../dom.mjs";
-
-const SVG_NS = "http://www.w3.org/2000/svg";
-
-function svgEl(tag, attrs = {}, children = []) {
-  const node = document.createElementNS(SVG_NS, tag);
-  for (const [k, v] of Object.entries(attrs)) {
-    if (v !== undefined && v !== null) node.setAttribute(k, String(v));
-  }
-  for (const child of children) {
-    if (child) node.appendChild(child);
-  }
-  return node;
-}
+import { el, svgEl } from "../dom.mjs";
 
 function makeSyncIcon() {
   return svgEl(
@@ -369,6 +356,7 @@ export function renderAutoSyncTab(ctx) {
             [
               el("span", { className: "mh-as-ai-dot" }),
               el("span", { text: tg.shortName || tg.name }),
+              on ? el("span", { className: "mh-as-ai-chk", text: "✓" }) : null,
             ],
           );
         }),

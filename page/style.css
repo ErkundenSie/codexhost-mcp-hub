@@ -186,14 +186,16 @@
 }
 
 .mh-header .mh-actions .mh-btn {
-  height: 34px;
-  min-width: 102px;
-  padding: 0 14px;
-  font-size: 13px;
+  height: 33px;
+  padding: 0 13px;
+  font-size: 12.5px;
   font-weight: 500;
   line-height: 1;
   white-space: nowrap;
-  box-shadow: none;
+}
+
+.mh-header .mh-actions .mh-btn-primary {
+  font-weight: 600;
 }
 
 .mh-btn-primary,
@@ -460,10 +462,25 @@
   border-color: var(--mh-blue);
 }
 
+.mh-search-wrap {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+}
+
+.mh-search-icon {
+  position: absolute;
+  left: 10px;
+  display: inline-flex;
+  align-items: center;
+  color: var(--cx-page-text-muted, #94a3b8);
+  pointer-events: none;
+}
+
 .mh-search {
-  min-width: 240px;
+  min-width: 256px;
   height: 30px;
-  padding: 0 10px;
+  padding: 0 10px 0 30px;
   font-size: 12.5px;
 }
 
@@ -636,7 +653,7 @@
 
 .mh-ai-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(148px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(122px, 1fr));
   gap: 7px;
 }
 
@@ -973,6 +990,10 @@
   background: var(--cx-page-bg, #ffffff);
 }
 
+.mh-tag-mono-font {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
 .mh-tag-mono {
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   background: var(--mh-mono-bg);
@@ -1076,6 +1097,132 @@
   max-width: 520px;
   margin-left: auto;
   margin-right: auto;
+}
+
+.mh-path-readonly {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-top: 8px;
+  padding: 6px 10px;
+  border-radius: 7px;
+  background: var(--mh-surface-subtle);
+  border: 1px solid var(--mh-divider);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 11.5px;
+  color: var(--mh-mono-text);
+}
+
+.mh-path-readonly-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.mh-path-readonly-badge {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "PingFang SC", "Microsoft YaHei", sans-serif;
+  font-size: 11px;
+  color: var(--cx-page-text-muted, #94a3b8);
+  flex-shrink: 0;
+}
+
+.mh-target-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--mh-card-border-hover);
+  display: inline-block;
+  flex-shrink: 0;
+}
+
+.mh-target-dot.is-on {
+  background: var(--mh-green);
+  box-shadow: 0 0 0 2.5px var(--mh-green-bg);
+}
+
+.mh-custom-inline-box {
+  padding: 14px 18px;
+  border-bottom: 1px solid var(--mh-divider);
+  background: var(--mh-surface-subtle);
+}
+
+.mh-modal-title-wrap {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.mh-wizard-title-icon {
+  display: inline-flex;
+  align-items: center;
+  color: var(--mh-primary);
+}
+
+.mh-wizard-stepper {
+  padding: 10px 18px;
+  background: var(--mh-surface-subtle);
+  border-bottom: 1px solid var(--mh-divider);
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 12px;
+}
+
+.mh-wizard-step {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-weight: 500;
+  color: var(--cx-page-text-muted, #64748b);
+}
+
+.mh-wizard-step.is-active {
+  font-weight: 600;
+  color: var(--mh-primary);
+}
+
+.mh-wizard-step.is-done {
+  font-weight: 600;
+  color: var(--mh-green);
+}
+
+.mh-wizard-step-num {
+  width: 19px;
+  height: 19px;
+  border-radius: 50%;
+  background: var(--mh-mono-bg);
+  border: 1px solid var(--mh-mono-border);
+  color: var(--cx-page-text-muted, #64748b);
+  font-size: 11px;
+  font-weight: 700;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.mh-wizard-step.is-active .mh-wizard-step-num {
+  background: var(--mh-primary);
+  border-color: var(--mh-primary);
+  color: #ffffff;
+}
+
+.mh-wizard-step.is-done .mh-wizard-step-num {
+  background: var(--mh-green);
+  border-color: var(--mh-green);
+  color: #ffffff;
+}
+
+.mh-wizard-step-line {
+  flex: 1;
+  height: 1px;
+  background: var(--mh-card-border);
+}
+
+.mh-wizard-step-line.is-done {
+  background: var(--mh-green-border);
 }
 
 .mh-path-row {
@@ -1604,7 +1751,7 @@
 .mh-as-opt.is-active {
   border-color: var(--mh-primary);
   box-shadow: 0 0 0 1px var(--mh-primary);
-  background: var(--mh-surface-subtle);
+  background: var(--mh-blue-bg);
 }
 
 .mh-as-opt-top {
@@ -1807,10 +1954,16 @@
 }
 
 .mh-as-ai-pill.is-on {
-  background: var(--cx-page-bg, #ffffff);
-  border-color: var(--mh-card-border-hover);
-  color: var(--cx-page-text, #0f172a);
-  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04);
+  background: var(--mh-green-bg);
+  border-color: var(--mh-green-border);
+  color: var(--mh-green);
+  box-shadow: none;
+}
+
+.mh-as-ai-chk {
+  font-size: 11px;
+  font-weight: 700;
+  margin-left: 1px;
 }
 
 .mh-as-ai-dot {

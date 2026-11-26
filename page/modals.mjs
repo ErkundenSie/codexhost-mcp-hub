@@ -3,7 +3,25 @@
  */
 
 import { transportSignature } from "../shared/models.mjs";
-import { el, formatTransportPreview, parseKvLines } from "./dom.mjs";
+import { el, formatTransportPreview, parseKvLines, svgEl } from "./dom.mjs";
+
+function makeWizardBoltIcon() {
+  return svgEl(
+    "svg",
+    {
+      width: 15,
+      height: 15,
+      viewBox: "0 0 24 24",
+      fill: "none",
+      stroke: "currentColor",
+      "stroke-width": 2.2,
+      "stroke-linecap": "round",
+      "stroke-linejoin": "round",
+      "aria-hidden": "true",
+    },
+    [svgEl("polygon", { points: "13 2 3 14 12 14 11 22 21 10 12 10 13 2" })],
+  );
+}
 
 function buildTransportFromForm(m) {
   if (m.transportType === "stdio") {
@@ -309,6 +327,7 @@ export function renderModal(ctx) {
   };
 
   let title = "";
+  let titleIcon = null;
   let modalTabs = null;
   let body = [];
   let footer = [];
@@ -319,8 +338,23 @@ export function renderModal(ctx) {
     const isStep1 = m.step === 1;
     const isAdd = m.mode === "add";
 
+    if (m.fromWizard) {
+      titleIcon = el("span", { className: "mh-wizard-title-icon" }, [makeWizardBoltIcon()]);
+      modalTabs = el("div", { className: "mh-wizard-stepper" }, [
+        el("span", { className: `mh-wizard-step ${isStep1 ? "is-active" : "is-done"}` }, [
+          el("span", { className: "mh-wizard-step-num", text: isStep1 ? "1" : "✓" }),
+          el("span", { text: t("wizardStep1") }),
+        ]),
+        el("span", { className: `mh-wizard-step-line ${!isStep1 ? "is-done" : ""}` }),
+        el("span", { className: `mh-wizard-step ${!isStep1 ? "is-active" : ""}` }, [
+          el("span", { className: "mh-wizard-step-num", text: "2" }),
+          el("span", { text: t("wizardStep2") }),
+        ]),
+      ]);
+    }
+
     if (isStep1) {
-      title = t("modalBatchStep1Title");
+      title = m.fromWizard ? t("wizardTitle") : t("modalBatchStep1Title");
       const selectedSet = new Set(m.ids);
       body = [
         el("div", { className: "mh-ai-panel-head", style: "margin-bottom:10px" }, [
@@ -852,7 +886,7 @@ export function renderModal(ctx) {
     [
       el("div", { className: "mh-modal" }, [
         el("div", { className: "mh-modal-head" }, [
-          el("span", { text: title }),
+          el("span", { className: "mh-modal-title-wrap" }, [titleIcon, el("span", { text: title })]),
           el("button", { className: "mh-btn mh-btn-sm", text: "✕", onClick: close }),
         ]),
         modalTabs,

@@ -1,5 +1,6 @@
 /**
- * "AI Targets" tab renderer: grouped settings panels for detected AIs & custom JSON targets.
+ * "AI Targets" tab renderer: clean overview cards with read-only path strips,
+ * on-demand path editing, soft-tinted MCP chips, and collapsible custom target form.
  */
 
 import { el } from "../dom.mjs";
@@ -15,18 +16,37 @@ export function renderTargetsTab(ctx) {
   );
 
   const renderTargetRow = (tg) => {
-    const pathInput = el("input", { className: "mh-input", value: tg.configPath });
+    const isEditing = state.editingTargetPathId === tg.id;
+    const isInstalled = tg.detected || tg.exists || tg.custom || tg.overridden;
+    const fmtLabel = tg.format === "codex-toml" ? "TOML" : "JSON";
+    const pathInput = isEditing
+      ? el("input", {
+          className: "mh-input",
+          value: tg.configPath,
+          "data-keep-focus": `target-path-${tg.id}`,
+        })
+      : null;
 
     return el("div", { className: "mh-setting-row" }, [
       el("div", { className: "mh-setting-row-head" }, [
         el("div", { className: "mh-card-title", style: "font-size:13.5px" }, [
+          el("span", { className: `mh-target-dot ${isInstalled ? "is-on" : ""}` }),
           el("span", { text: tg.name }),
-          tg.custom ? el("span", { className: "mh-tag", text: t("badgeCustom") }) : null,
+          el("span", { className: "mh-tag mh-tag-mono", text: fmtLabel }),
+          tg.custom ? el("span", { className: "mh-tag mh-tag-accent", text: t("badgeCustom") }) : null,
         ]),
         el("div", { className: "mh-card-actions" }, [
           el("span", {
             className: "mh-backup-time",
             text: t("targetNativeCount", { count: tg.nativeCount }),
+          }),
+          el("button", {
+            className: "mh-btn mh-btn-sm",
+            text: isEditing ? t("btnCancel") : t("targetEditPath"),
+            onClick: () => {
+              state.editingTargetPathId = isEditing ? null : tg.id;
+              render();
+            },
           }),
           tg.custom
             ? el("button", {
@@ -37,6 +57,7 @@ export function renderTargetsTab(ctx) {
                     state.overview = await api.backend.invoke("targets/custom-remove", {
                       targetId: tg.id,
                     });
+                    if (state.editingTargetPathId === tg.id) state.editingTargetPathId = null;
                     render();
                   } catch (err) {
                     showToast(err instanceof Error ? err.message : String(err), true);
@@ -46,7 +67,54 @@ export function renderTargetsTab(ctx) {
             : null,
         ]),
       ]),
-      tg.error ? el("div", { className: "mh-probe-bar is-err", style: "margin:6px 0 0", text: tg.error }) : null,
+      tg.error ? el("div", { className: "mh-probe-bar is-err", style: "margin:8px 0 0", text: tg.error }) : null,
+      isEditing
+        ? el("div", { className: "mh-path-row" }, [
+            pathInput,
+            el("button", {
+              className: "mh-btn mh-btn-sm mh-btn-primary",
+              text: t("targetSavePath"),
+              onClick: async () => {
+                try {
+                  state.overview = await api.backend.invoke("targets/set-path", {
+                    targetId: tg.id,
+                    configPath: pathInput.value,
+                  });
+                  state.editingTargetPathId = null;
+                  showToast(t("toastPathUpdated"));
+                  render();
+                } catch (err) {
+                  showToast(err instanceof Error ? err.message : String(err), true);
+                }
+              },
+            }),
+            tg.overridden
+              ? el("button", {
+                  className: "mh-btn mh-btn-sm",
+                  text: t("targetResetPath"),
+                  onClick: async () => {
+                    try {
+                      state.overview = await api.backend.invoke("targets/set-path", {
+                        targetId: tg.id,
+                        configPath: "",
+                      });
+                      state.editingTargetPathId = null;
+                      showToast(t("toastPathUpdated"));
+                      render();
+                    } catch (err) {
+                      showToast(err instanceof Error ? err.message : String(err), true);
+                    }
+                  },
+                })
+              : null,
+          ])
+        : el("div", { className: "mh-path-readonly" }, [
+            el("span", { className: "mh-path-readonly-text", title: tg.configPath, text: tg.configPath }),
+            el("span", {
+              className: "mh-path-readonly-badge",
+              text: tg.overridden || tg.custom ? t("targetPathCustom") : t("targetPathDefault"),
+            }),
+          ]),
       tg.nativeServers.length > 0
         ? el(
             "div",
@@ -61,43 +129,6 @@ export function renderTargetsTab(ctx) {
             ),
           )
         : null,
-      el("div", { className: "mh-path-row" }, [
-        pathInput,
-        el("button", {
-          className: "mh-btn mh-btn-sm",
-          text: t("targetSavePath"),
-          onClick: async () => {
-            try {
-              state.overview = await api.backend.invoke("targets/set-path", {
-                targetId: tg.id,
-                configPath: pathInput.value,
-              });
-              showToast(t("toastPathUpdated"));
-              render();
-            } catch (err) {
-              showToast(err instanceof Error ? err.message : String(err), true);
-            }
-          },
-        }),
-        tg.overridden
-          ? el("button", {
-              className: "mh-btn mh-btn-sm",
-              text: t("targetResetPath"),
-              onClick: async () => {
-                try {
-                  state.overview = await api.backend.invoke("targets/set-path", {
-                    targetId: tg.id,
-                    configPath: "",
-                  });
-                  showToast(t("toastPathUpdated"));
-                  render();
-                } catch (err) {
-                  showToast(err instanceof Error ? err.message : String(err), true);
-                }
-              },
-            })
-          : null,
-      ]),
     ]);
   };
 
@@ -115,8 +146,58 @@ export function renderTargetsTab(ctx) {
         el("h3", { text: t("targetsPanelTitle") }),
         el("p", { text: t("targetsHint") }),
       ]),
-      el("span", { className: "mh-tag mh-tag-mono", text: String(visibleInstalled.length) }),
+      el("div", { className: "mh-actions" }, [
+        el("span", { className: "mh-as-count-pill", text: String(visibleInstalled.length) }),
+        el("button", {
+          className: `mh-btn mh-btn-sm ${state.showCustomTargetForm ? "mh-btn-soft" : ""}`,
+          text: state.showCustomTargetForm ? t("btnCancel") : t("btnAddCustomTargetShort"),
+          onClick: () => {
+            state.showCustomTargetForm = !state.showCustomTargetForm;
+            render();
+          },
+        }),
+      ]),
     ]),
+    state.showCustomTargetForm
+      ? el("div", { className: "mh-custom-inline-box" }, [
+          el("div", { className: "mh-form-grid" }, [
+            el("div", { className: "mh-field-row" }, [
+              el("div", { className: "mh-field" }, [
+                el("label", { text: t("customTargetName") }),
+                nameInput,
+              ]),
+              el("div", { className: "mh-field" }, [
+                el("label", { text: t("customTargetRootKey") }),
+                keyInput,
+              ]),
+            ]),
+            el("div", { className: "mh-field" }, [
+              el("label", { text: t("customTargetPath") }),
+              el("div", { className: "mh-path-row", style: "margin-top:0" }, [
+                pathInput,
+                el("button", {
+                  className: "mh-btn mh-btn-sm mh-btn-primary",
+                  text: t("btnSave"),
+                  onClick: async () => {
+                    try {
+                      state.overview = await api.backend.invoke("targets/custom-add", {
+                        name: nameInput.value,
+                        configPath: pathInput.value,
+                        rootKey: keyInput.value || "mcpServers",
+                      });
+                      state.showCustomTargetForm = false;
+                      showToast(t("toastSaved", { name: nameInput.value }));
+                      render();
+                    } catch (err) {
+                      showToast(err instanceof Error ? err.message : String(err), true);
+                    }
+                  },
+                }),
+              ]),
+            ]),
+          ]),
+        ])
+      : null,
     el("div", { className: "mh-setting-rows" }, visibleInstalled.map(renderTargetRow)),
     hiddenUninstalled.length > 0
       ? el("div", { className: "mh-panel-foot" }, [
@@ -138,39 +219,5 @@ export function renderTargetsTab(ctx) {
       : null,
   ]);
 
-  const addCustomPanel = el("div", { className: "mh-panel" }, [
-    el("div", { className: "mh-panel-head" }, [
-      el("div", {}, [
-        el("h3", { text: t("btnAddCustomTarget") }),
-        el("p", { text: t("customTargetPanelDesc") }),
-      ]),
-    ]),
-    el("div", { className: "mh-panel-body" }, [
-      el("div", { className: "mh-form-grid" }, [
-        el("div", { className: "mh-field-row" }, [nameInput, keyInput]),
-        el("div", { className: "mh-path-row", style: "margin-top:0" }, [pathInput]),
-      ]),
-    ]),
-    el("div", { className: "mh-panel-foot", style: "justify-content:flex-end" }, [
-      el("button", {
-        className: "mh-btn mh-btn-primary",
-        text: t("btnSave"),
-        onClick: async () => {
-          try {
-            state.overview = await api.backend.invoke("targets/custom-add", {
-              name: nameInput.value,
-              configPath: pathInput.value,
-              rootKey: keyInput.value || "mcpServers",
-            });
-            showToast(t("toastSaved", { name: nameInput.value }));
-            render();
-          } catch (err) {
-            showToast(err instanceof Error ? err.message : String(err), true);
-          }
-        },
-      }),
-    ]),
-  ]);
-
-  return el("div", {}, [detectedPanel, addCustomPanel]);
+  return el("div", {}, [detectedPanel]);
 }

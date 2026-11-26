@@ -2,7 +2,25 @@
  * "MCP List" tab renderer: search toolbar (IME & focus safe), batch bar, and 2-tier MCP cards.
  */
 
-import { el, formatTransportPreview } from "../dom.mjs";
+import { el, formatTransportPreview, svgEl } from "../dom.mjs";
+
+function makeSearchIcon() {
+  return svgEl(
+    "svg",
+    {
+      width: 13,
+      height: 13,
+      viewBox: "0 0 24 24",
+      fill: "none",
+      stroke: "currentColor",
+      "stroke-width": 2,
+      "stroke-linecap": "round",
+      "stroke-linejoin": "round",
+      "aria-hidden": "true",
+    },
+    [svgEl("circle", { cx: 11, cy: 11, r: 8 }), svgEl("path", { d: "m21 21-4.3-4.3" })],
+  );
+}
 
 function computeServerCardChanges(server, managed) {
   const synced = [];
@@ -111,25 +129,28 @@ export function renderServersTab(ctx) {
         }),
         t("batchSelectAll", { selected: selectedInFiltered, total: filtered.length }),
       ]),
-      el("input", {
-        className: "mh-input mh-search",
-        type: "search",
-        "data-keep-focus": "server-search",
-        placeholder: t("searchPlaceholder"),
-        value: state.search,
-        onCompositionstart: () => {
-          state.searchComposing = true;
-        },
-        onCompositionend: (e) => {
-          state.searchComposing = false;
-          state.search = e.target.value;
-          render();
-        },
-        onInput: (e) => {
-          state.search = e.target.value;
-          if (!state.searchComposing) render();
-        },
-      }),
+      el("div", { className: "mh-search-wrap" }, [
+        el("span", { className: "mh-search-icon" }, [makeSearchIcon()]),
+        el("input", {
+          className: "mh-input mh-search",
+          type: "search",
+          "data-keep-focus": "server-search",
+          placeholder: t("searchPlaceholder"),
+          value: state.search,
+          onCompositionstart: () => {
+            state.searchComposing = true;
+          },
+          onCompositionend: (e) => {
+            state.searchComposing = false;
+            state.search = e.target.value;
+            render();
+          },
+          onInput: (e) => {
+            state.search = e.target.value;
+            if (!state.searchComposing) render();
+          },
+        }),
+      ]),
     ]),
     el("div", { className: "mh-legend" }, [
       el("span", { className: "mh-legend-item" }, [
@@ -334,7 +355,10 @@ export function renderServersTab(ctx) {
               el("div", { className: "mh-card-name-row" }, [
                 el("span", { className: "mh-card-name", text: server.name }),
                 server.alias ? el("span", { className: "mh-tag mh-tag-alias", text: server.alias }) : null,
-                el("span", { className: "mh-tag mh-tag-mono", text: transportBadge }),
+                el("span", {
+                  className: `mh-tag ${server.transport?.type === "stdio" ? "mh-tag-mono" : "mh-tag-accent mh-tag-mono-font"}`,
+                  text: transportBadge,
+                }),
                 !server.enabled ? el("span", { className: "mh-tag", text: t("badgeDisabled") }) : null,
                 server.isLoopback
                   ? el("span", {

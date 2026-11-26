@@ -4,6 +4,12 @@
 
 import { el, formatDate } from "../dom.mjs";
 
+function formatBytes(bytes) {
+  const n = Number(bytes) || 0;
+  if (n >= 1024) return `${(n / 1024).toFixed(1)} KB`;
+  return `${n} B`;
+}
+
 export function renderProjectAndBackupsTab(ctx) {
   const { state, api, t, render, showToast } = ctx;
 
@@ -148,9 +154,9 @@ export function renderProjectAndBackupsTab(ctx) {
             el("div", { className: "mh-backup-row" }, [
               el("div", { className: "mh-backup-info" }, [
                 el("div", { className: "mh-backup-meta" }, [
-                  el("strong", { text: b.targetName || b.targetId }),
+                  el("span", { className: "mh-tag mh-tag-mono", text: b.targetName || b.targetId }),
                   el("span", { className: "mh-backup-time", text: formatDate(b.createdAt) }),
-                  el("span", { className: "mh-tag mh-tag-mono", text: `${b.sizeBytes} B` }),
+                  el("span", { className: "mh-backup-time", text: `· ${formatBytes(b.sizeBytes)}` }),
                 ]),
                 el("div", { className: "mh-cmd-inline", text: b.configPath }),
               ]),

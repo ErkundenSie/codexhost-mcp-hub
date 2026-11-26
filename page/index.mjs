@@ -7,7 +7,7 @@
 
 import { createTranslator } from "../shared/i18n.mjs";
 import { toStandardMcpJson } from "../shared/models.mjs";
-import { el, formatKvLines } from "./dom.mjs";
+import { el, formatKvLines, svgEl } from "./dom.mjs";
 import { renderModal } from "./modals.mjs";
 import { renderAutoSyncTab } from "./tabs/autosync.mjs";
 import { renderProjectAndBackupsTab } from "./tabs/project-backups.mjs";
@@ -24,6 +24,8 @@ export async function mount(root, api) {
     selectedServerIds: new Set(),
     openMoreId: null,
     showUninstalledTargets: false,
+    editingTargetPathId: null,
+    showCustomTargetForm: false,
     loading: true,
     syncing: false,
     applyingServerIds: new Set(),
@@ -279,25 +281,68 @@ export async function mount(root, api) {
     }
   }
 
+  function makePlusIcon() {
+    return svgEl(
+      "svg",
+      {
+        width: 14,
+        height: 14,
+        viewBox: "0 0 24 24",
+        fill: "none",
+        stroke: "currentColor",
+        "stroke-width": 2.2,
+        "stroke-linecap": "round",
+        "stroke-linejoin": "round",
+        "aria-hidden": "true",
+      },
+      [svgEl("path", { d: "M12 5v14" }), svgEl("path", { d: "M5 12h14" })],
+    );
+  }
+
+  function makeBoltIcon() {
+    return svgEl(
+      "svg",
+      {
+        width: 14,
+        height: 14,
+        viewBox: "0 0 24 24",
+        fill: "none",
+        stroke: "currentColor",
+        "stroke-width": 2.1,
+        "stroke-linecap": "round",
+        "stroke-linejoin": "round",
+        "aria-hidden": "true",
+      },
+      [svgEl("polygon", { points: "13 2 3 14 12 14 11 22 21 10 12 10 13 2" })],
+    );
+  }
+
   function renderHeader() {
     const serverCount = (state.overview?.servers ?? []).length;
+    const addLabel = t("btnAddUnified").replace(/^\+\s*/, "");
     return el("div", { className: "mh-header" }, [
       el("div", { className: "mh-title-wrap" }, [
         el("h1", { text: t("appTitle") }),
         el("p", { className: "mh-subtitle", text: t("appSubtitle") }),
       ]),
       el("div", { className: "mh-actions" }, [
-        el("button", {
-          className: "mh-btn mh-btn-primary",
-          disabled: state.loading || serverCount === 0,
-          text: t("btnBatchConfig"),
-          onClick: () => openBatchWizard(),
-        }),
-        el("button", {
-          className: "mh-btn mh-btn-soft",
-          text: t("btnAddUnified"),
-          onClick: () => openUnifiedAddModal("json"),
-        }),
+        el(
+          "button",
+          {
+            className: "mh-btn mh-btn-primary",
+            disabled: state.loading || serverCount === 0,
+            onClick: () => openBatchWizard(),
+          },
+          [makeBoltIcon(), el("span", { text: t("btnBatchConfig") })],
+        ),
+        el(
+          "button",
+          {
+            className: "mh-btn mh-btn-soft",
+            onClick: () => openUnifiedAddModal("json"),
+          },
+          [makePlusIcon(), el("span", { text: addLabel })],
+        ),
       ]),
     ]);
   }

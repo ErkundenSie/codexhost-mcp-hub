@@ -2,6 +2,19 @@
  * Shared DOM builder and formatting helpers for MCP Hub page modules.
  */
 
+const SVG_NS = "http://www.w3.org/2000/svg";
+
+export function svgEl(tag, attrs = {}, children = []) {
+  const node = document.createElementNS(SVG_NS, tag);
+  for (const [k, v] of Object.entries(attrs)) {
+    if (v !== undefined && v !== null) node.setAttribute(k, String(v));
+  }
+  for (const child of children) {
+    if (child) node.appendChild(child);
+  }
+  return node;
+}
+
 export function el(tag, attrs = {}, children = []) {
   const node = document.createElement(tag);
   let deferredValue;
