@@ -1,0 +1,50 @@
+name: Release MCP Hub
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Pack extension ZIP
+        run: node scripts/pack.mjs
+
+      - name: Run automated tests
+        run: node --test test/hub.test.mjs
+
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          VERSION=$(node -p "require('./manifest.json').version")
+          TAG="${GITHUB_REF_NAME}"
+          if [[ "${GITHUB_REF_TYPE}" != "tag" ]]; then
+            TAG="v${VERSION}"
+          fi
+          ZIP="dist/mcp-hub-${VERSION}.zip"
+          if [ ! -f "$ZIP" ]; then
+            echo "Expected package not found: $ZIP" >&2
+            exit 1
+          fi
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" "$ZIP" --clobber
+          else
+            gh release create "$TAG" "$ZIP" \
+              --title "${TAG} — MCP Hub" \
+              --generate-notes
+          fi
