@@ -1,0 +1,876 @@
+import assert from "node:assert/strict";
+import http from "node:http";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
+import test from "node:test";
+import { fileURLToPath } from "node:url";
+import { crc32, inflateRawSync } from "node:zlib";
+
+import { activate, createHubController } from "../backend/index.mjs";
+import { parseCodexMcpServers, updateCodexToml } from "../backend/toml.mjs";
+import { detectBuiltinMcp, isCodexhostLoopbackServer, parseMcpJsonInput } from "../shared/models.mjs";
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const rootDir = path.resolve(__dirname, "..");
+
+test("manifest.json conforms to codexhost manifestVersion 2 contract and assets are valid PNGs", async () => {
+  const manifest = JSON.parse(await readFile(path.join(rootDir, "manifest.json"), "utf8"));
+  assert.equal(manifest.manifestVersion, 2);
+  assert.match(manifest.id, /^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*$/);
+  assert.ok(manifest.name.en && manifest.name["zh-CN"]);
+  assert.ok(manifest.description.en && manifest.description["zh-CN"]);
+  assert.ok(manifest.details.en && manifest.details["zh-CN"]);
+  assert.ok(Array.isArray(manifest.categories) && manifest.categories.length > 0);
+  assert.equal(manifest.page.apiVersion, 1);
+  assert.equal(manifest.widget.apiVersion, 1);
+  assert.equal(manifest.backend.apiVersion, 1);
+  assert.notEqual(manifest.backend.entry, manifest.page.entry);
+  assert.notEqual(manifest.backend.entry, manifest.widget.entry);
+
+  const pngSig = Buffer.from("89504e470d0a1a0a", "hex");
+  const icon = await readFile(path.join(rootDir, manifest.icon));
+  assert.ok(icon.subarray(0, 8).equals(pngSig), "icon.png must have valid PNG signature");
+  assert.ok(icon.length <= 128 * 1024, "icon.png must be <= 128 KiB");
+
+  for (const s of manifest.screenshots) {
+    const buf = await readFile(path.join(rootDir, s));
+    assert.ok(buf.subarray(0, 8).equals(pngSig), `${s} must have valid PNG signature`);
+    assert.ok(buf.length <= 512 * 1024, `${s} must be <= 512 KiB`);
+  }
+
+  // Ensure all frontend & shared modules obey CSP / Desktop linker rules
+  for (const rel of [
+    manifest.page.entry,
+    "page/dom.mjs",
+    "page/modals.mjs",
+    "page/tabs/servers.mjs",
+    "page/tabs/targets.mjs",
+    "page/tabs/project-backups.mjs",
+    manifest.widget.entry,
+    "shared/models.mjs",
+    "shared/i18n.mjs",
+  ]) {
+    const src = await readFile(path.join(rootDir, rel), "utf8");
+    assert.doesNotMatch(src, /\beval\s*\(/, `${rel} must not use eval()`);
+    assert.doesNotMatch(src, /\bnew\s+Function\s*\(/, `${rel} must not use new Function()`);
+    assert.doesNotMatch(src, /\bimport\s*\(/, `${rel} must not use dynamic import()`);
+  }
+});
+
+test("parseMcpJsonInput handles standard mcpServers, OpenCode mcp, bare objects, and loopback detection", () => {
+  const fromStd = parseMcpJsonInput(
+    JSON.stringify({
+      mcpServers: {
+        filesystem: { command: "npx", args: ["-y", "@modelcontextprotocol/server-filesystem", "D:\\Work"] },
+        remoteApi: { type: "http", url: "https://example.com/mcp", headers: { Authorization: "Bearer tok" } },
+      },
+    }),
+  );
+  assert.equal(fromStd.length, 2);
+  assert.equal(fromStd[0].transport.type, "stdio");
+  assert.equal(fromStd[1].transport.type, "http");
+
+  const fromOpenCode = parseMcpJsonInput(
+    JSON.stringify({
+      mcp: {
+        localTool: { type: "local", command: ["uvx", "mcp-server-git"], environment: { GIT_DIR: "/tmp" } },
+      },
+    }),
+  );
+  assert.equal(fromOpenCode.length, 1);
+  assert.equal(fromOpenCode[0].transport.command, "uvx");
+  assert.deepEqual(fromOpenCode[0].transport.args, ["mcp-server-git"]);
+  assert.deepEqual(fromOpenCode[0].transport.env, { GIT_DIR: "/tmp" });
+
+  assert.equal(
+    isCodexhostLoopbackServer("codexhost", { type: "http", url: "http://127.0.0.1:4398/mcp" }),
+    true,
+  );
+  assert.equal(
+    isCodexhostLoopbackServer("github", { type: "http", url: "https://api.githubcopilot.com/mcp/" }),
+    false,
+  );
+
+  const codexRepl = detectBuiltinMcp("node_repl", {
+    type: "stdio",
+    command: "C:\\Program Files\\WindowsApps\\OpenAI.Codex_26.1120.5083.0_x64__2p2nqsd0c76g0\\app\\resources\\cua_node\\bin\\node_repl.exe",
+    args: [],
+  });
+  assert.equal(codexRepl.isBuiltin, true);
+  assert.equal(codexRepl.vendor, "Codex");
+  assert.equal(codexRepl.ownerTargetId, "codex");
+
+  const magpie = detectBuiltinMcp("magpie-artifacts", {
+    type: "stdio",
+    command: "D:\\magpie\\magpie.exe",
+    args: ["mcp", "artifacts"],
+  });
+  assert.equal(magpie.isBuiltin, false);
+});
+
+test("builtin vendor MCPs like Codex node_repl are excluded on import and protected from deletion on Codex", async () => {
+  const tmpRoot = await mkdtemp(path.join(os.tmpdir(), "mcp-hub-builtin-"));
+  const fakeHome = path.join(tmpRoot, "home");
+  const dataDir = path.join(tmpRoot, "data");
+  await mkdir(path.join(fakeHome, ".codex"), { recursive: true });
+  await mkdir(path.join(fakeHome, ".cursor"), { recursive: true });
+
+  await writeFile(
+    path.join(fakeHome, ".codex", "config.toml"),
+    [
+      "[mcp_servers.node_repl]",
+      'command = "C:\\\\Program Files\\\\WindowsApps\\\\OpenAI.Codex_26.1120.5083.0_x64__2p2nqsd0c76g0\\\\app\\\\resources\\\\cua_node\\\\bin\\\\node_repl.exe"',
+      "",
+      "[mcp_servers.magpie-artifacts]",
+      'command = "D:\\\\magpie\\\\magpie.exe"',
+      'args = ["mcp", "artifacts"]',
+      "",
+    ].join("\n"),
+    "utf8",
+  );
+  await writeFile(
+    path.join(fakeHome, ".cursor", "mcp.json"),
+    JSON.stringify({
+      mcpServers: {
+        node_repl: {
+          command: "C:\\Program Files\\WindowsApps\\OpenAI.Codex_26.1120.5083.0_x64__2p2nqsd0c76g0\\app\\resources\\cua_node\\bin\\node_repl.exe",
+        },
+      },
+    }),
+    "utf8",
+  );
+
+  try {
+    const hub = createHubController({
+      dataDir,
+      readSettings: async () => ({ excludeBuiltinMcp: true, autoBackup: false }),
+      home: fakeHome,
+      platform: "win32",
+    });
+
+    // Import from Codex skips node_repl automatically
+    const imp = await hub.importFromTarget({
+      sourceTargetId: "codex",
+      assignTargets: ["codex", "cursor"],
+    });
+    assert.equal(imp.added, 1);
+    assert.equal(imp.skippedBuiltin, 1);
+    assert.deepEqual(
+      imp.overview.servers.map((s) => s.name),
+      ["magpie-artifacts"],
+    );
+
+    // Even if node_repl was previously marked managed on BOTH codex and cursor (e.g. from v1.0.0),
+    // syncing should remove it from cursor while protecting it in codex!
+    const statePath = path.join(dataDir, "hub-state.json");
+    const rawState = JSON.parse(await readFile(statePath, "utf8"));
+    rawState.managedKeysByTarget.codex = ["node_repl", "magpie-artifacts"];
+    rawState.managedKeysByTarget.cursor = ["node_repl"];
+    await writeFile(statePath, JSON.stringify(rawState, null, 2), "utf8");
+
+    const preview = await hub.previewSync();
+    const codexDiff = preview.diffs.find((d) => d.targetId === "codex");
+    const cursorDiff = preview.diffs.find((d) => d.targetId === "cursor");
+    assert.deepEqual(codexDiff.removes, []);
+    assert.ok(codexDiff.preservedUnmanaged.includes("node_repl"));
+    assert.deepEqual(cursorDiff.removes, ["node_repl"]);
+
+    await hub.applySync();
+    const codexAfter = parseCodexMcpServers(
+      await readFile(path.join(fakeHome, ".codex", "config.toml"), "utf8"),
+    );
+    const cursorAfter = JSON.parse(
+      await readFile(path.join(fakeHome, ".cursor", "mcp.json"), "utf8"),
+    );
+    assert.ok(codexAfter.node_repl, "node_repl must remain intact in Codex config.toml");
+    assert.equal(cursorAfter.mcpServers.node_repl, undefined, "node_repl should be cleaned from Cursor");
+  } finally {
+    await rm(tmpRoot, { recursive: true, force: true });
+  }
+});
+
+test("v1.1.0 as-is import produces 0 pending changes, scopes managed targets to existing files, and computes 4-state targetStatuses", async () => {
+  const tmpRoot = await mkdtemp(path.join(os.tmpdir(), "mcp-hub-v110-"));
+  const fakeHome = path.join(tmpRoot, "home");
+  const dataDir = path.join(tmpRoot, "data");
+  await mkdir(path.join(fakeHome, ".codex"), { recursive: true });
+  await mkdir(path.join(fakeHome, ".gemini", "config"), { recursive: true });
+  // Empty dir only (no settings.json) -> should NOT be auto-enabled as managed target!
+  await mkdir(path.join(fakeHome, ".qoder-cn"), { recursive: true });
+
+  await writeFile(
+    path.join(fakeHome, ".codex", "config.toml"),
+    [
+      "[mcp_servers.ssh-mcp]",
+      'command = "node"',
+      'args = ["ssh.mjs"]',
+      "",
+      "[mcp_servers.notion]",
+      'url = "https://mcp.notion.com/mcp"',
+      "",
+    ].join("\n"),
+    "utf8",
+  );
+  await writeFile(
+    path.join(fakeHome, ".gemini", "config", "mcp_config.json"),
+    JSON.stringify({
+      mcpServers: {
+        "ssh-mcp": { command: "node", args: ["ssh.mjs"] },
+      },
+    }),
+    "utf8",
+  );
+
+  try {
+    const hub = createHubController({
+      dataDir,
+      readSettings: async () => ({ excludeBuiltinMcp: true, autoBackup: false }),
+      home: fakeHome,
+      platform: "win32",
+    });
+
+    const ov0 = await hub.buildOverview();
+    const enabledIds = ov0.targets.filter((t) => t.enabled).map((t) => t.id).sort();
+    assert.deepEqual(enabledIds, ["antigravity", "codex"]);
+    assert.equal(ov0.targets.find((t) => t.id === "qoder").enabled, false);
+    assert.equal(ov0.summary.newImportableCount, 2);
+
+    // As-is import without assignTargets -> 0 unexpected pending changes!
+    const imp = await hub.importFromTarget({ sourceTargetId: "all" });
+    assert.equal(imp.added, 2);
+    assert.equal(imp.overview.summary.pendingChanges, 0);
+
+    const ssh = imp.overview.servers.find((s) => s.name === "ssh-mcp");
+    const notion = imp.overview.servers.find((s) => s.name === "notion");
+    assert.deepEqual([...ssh.targets].sort(), ["antigravity", "codex"]);
+    assert.deepEqual(notion.targets, ["codex"]);
+    assert.equal(ssh.targetStatuses.codex, "synced");
+    assert.equal(ssh.targetStatuses.antigravity, "synced");
+    assert.equal(notion.targetStatuses.codex, "synced");
+    assert.equal(notion.targetStatuses.antigravity, "off");
+
+    // Toggle notion ON for antigravity -> pending-add; toggle ssh OFF for antigravity -> pending-remove
+    await hub.setServerTargets({ id: notion.id, targets: ["codex", "antigravity"] });
+    const ov1 = await hub.setServerTargets({ id: ssh.id, targets: ["codex"] });
+    assert.equal(ov1.servers.find((s) => s.id === notion.id).targetStatuses.antigravity, "pending-add");
+    assert.equal(ov1.servers.find((s) => s.id === ssh.id).targetStatuses.antigravity, "pending-remove");
+    assert.equal(ov1.summary.pendingChanges, 2);
+
+    // Strict detection: ~/.gemini/config exists, so antigravity is detected, NOT gemini-cli;
+    // ~/.qoder-cn empty dir does NOT falsely detect qoder!
+    assert.equal(ov1.targets.find((t) => t.id === "gemini-cli").detected, false);
+    assert.equal(ov1.targets.find((t) => t.id === "qoder").detected, false);
+
+    // Adding Pi and Grok configs causes them to auto-detect and become active automatically on next scan
+    await mkdir(path.join(fakeHome, ".pi", "agent"), { recursive: true });
+    await writeFile(
+      path.join(fakeHome, ".pi", "agent", "mcp.json"),
+      JSON.stringify({ mcpServers: { playwright: { command: "npx", args: ["-y", "pw-mcp"] } } }),
+      "utf8",
+    );
+    await mkdir(path.join(fakeHome, ".grok"), { recursive: true });
+    await writeFile(
+      path.join(fakeHome, ".grok", "config.toml"),
+      '[mcp_servers.grok_tool]\ncommand = "node"\nargs = ["g.js"]\n',
+      "utf8",
+    );
+    const ov3 = await hub.buildOverview();
+    const pi = ov3.targets.find((t) => t.id === "pi");
+    const grok = ov3.targets.find((t) => t.id === "grok");
+    assert.equal(pi.detected, true);
+    assert.equal(pi.enabled, true);
+    assert.equal(pi.nativeCount, 1);
+    assert.equal(grok.detected, true);
+    assert.equal(grok.enabled, true);
+    assert.equal(grok.nativeCount, 1);
+
+    // v1.3.0: auto-enable when assigning targets to a disabled MCP + batch-targets add/remove
+    await hub.toggleServer({ id: ssh.id, enabled: false });
+    const afterSingle = await hub.setServerTargets({
+      id: ssh.id,
+      targets: ["codex", "pi"],
+      autoEnable: true,
+    });
+    const sshReenabled = afterSingle.servers.find((s) => s.id === ssh.id);
+    assert.equal(sshReenabled.enabled, true);
+    assert.deepEqual([...sshReenabled.targets].sort(), ["codex", "pi"]);
+
+    const batchAdd = await hub.batchUpdateTargets({
+      ids: [ssh.id, notion.id],
+      targetIds: ["antigravity", "pi"],
+      mode: "add",
+    });
+    assert.equal(batchAdd.affected, 2);
+    assert.ok(batchAdd.overview.servers.find((s) => s.id === notion.id).targets.includes("pi"));
+    assert.ok(batchAdd.overview.servers.find((s) => s.id === notion.id).targets.includes("antigravity"));
+
+    const batchRemove = await hub.batchUpdateTargets({
+      ids: [ssh.id, notion.id],
+      targetIds: ["pi"],
+      mode: "remove",
+    });
+    assert.equal(batchRemove.affected, 2);
+    assert.equal(batchRemove.overview.servers.find((s) => s.id === ssh.id).targets.includes("pi"), false);
+    assert.equal(batchRemove.overview.servers.find((s) => s.id === notion.id).targets.includes("pi"), false);
+  } finally {
+    await rm(tmpRoot, { recursive: true, force: true });
+  }
+});
+
+test("v2.0.0 applySingleServer, revertSingleServer, and batchApplyTargets with skipExisting overwrite guard", async () => {
+  const tmpRoot = await mkdtemp(path.join(os.tmpdir(), "mcp-hub-v200-"));
+  const fakeHome = path.join(tmpRoot, "home");
+  const dataDir = path.join(tmpRoot, "data");
+  await mkdir(path.join(fakeHome, ".codex"), { recursive: true });
+  await mkdir(path.join(fakeHome, ".cursor"), { recursive: true });
+  await mkdir(path.join(fakeHome, ".pi", "agent"), { recursive: true });
+
+  await writeFile(
+    path.join(fakeHome, ".codex", "config.toml"),
+    [
+      "[mcp_servers.notion]",
+      'url = "https://mcp.notion.com/mcp"',
+      "",
+      "[mcp_servers.ssh-mcp]",
+      'command = "node"',
+      'args = ["ssh.mjs"]',
+      "",
+    ].join("\n"),
+    "utf8",
+  );
+  await writeFile(
+    path.join(fakeHome, ".cursor", "mcp.json"),
+    JSON.stringify({ mcpServers: { keep_native: { command: "node", args: ["keep.js"] } } }),
+    "utf8",
+  );
+  // Pi already has a DIFFERENTLY configured `notion`!
+  await writeFile(
+    path.join(fakeHome, ".pi", "agent", "mcp.json"),
+    JSON.stringify({ mcpServers: { notion: { command: "npx", args: ["-y", "custom-notion-local"] } } }),
+    "utf8",
+  );
+
+  try {
+    const hub = createHubController({
+      dataDir,
+      readSettings: async () => ({ autoBackup: true, excludeBuiltinMcp: true }),
+      home: fakeHome,
+      platform: "win32",
+    });
+
+    const imp = await hub.importFromTarget({ sourceTargetId: "codex" });
+    const notion = imp.overview.servers.find((s) => s.name === "notion");
+    const ssh = imp.overview.servers.find((s) => s.name === "ssh-mcp");
+
+    // Stage pending edits on BOTH notion and ssh, then apply ONLY notion!
+    await hub.setServerTargets({ id: notion.id, targets: ["codex", "cursor"] });
+    await hub.setServerTargets({ id: ssh.id, targets: ["codex", "cursor"] });
+
+    const singleRes = await hub.applySingleServer({ id: notion.id });
+    assert.equal(singleRes.updatedCount, 1);
+    const cursorAfterSingle = JSON.parse(
+      await readFile(path.join(fakeHome, ".cursor", "mcp.json"), "utf8"),
+    );
+    assert.ok(cursorAfterSingle.mcpServers.notion, "notion should be written to Cursor");
+    assert.equal(cursorAfterSingle.mcpServers["ssh-mcp"], undefined, "ssh-mcp must NOT be written yet");
+    assert.ok(cursorAfterSingle.mcpServers.keep_native, "unmanaged native entry must be preserved");
+
+    // Revert ssh back to synced-only
+    const afterRevert = await hub.revertSingleServer({ id: ssh.id });
+    assert.deepEqual(afterRevert.servers.find((s) => s.id === ssh.id).targets, ["codex"]);
+
+    // Batch Add both notion & ssh to Cursor & Pi with skipExisting = true:
+    // Pi's differently-configured `notion` must be SKIPPED and preserved!
+    const batchSafe = await hub.batchApplyTargets({
+      ids: [notion.id, ssh.id],
+      targetIds: ["cursor", "pi"],
+      mode: "add",
+      skipExisting: true,
+    });
+    assert.equal(batchSafe.skippedCount, 1);
+    const piAfterSafe = JSON.parse(
+      await readFile(path.join(fakeHome, ".pi", "agent", "mcp.json"), "utf8"),
+    );
+    assert.equal(piAfterSafe.mcpServers.notion.command, "npx", "Pi custom notion must be preserved");
+    assert.equal(piAfterSafe.mcpServers["ssh-mcp"].command, "node", "ssh-mcp should be added to Pi");
+
+    // Batch Add with skipExisting = false overwrites Pi's notion (with backup)
+    const batchForce = await hub.batchApplyTargets({
+      ids: [notion.id],
+      targetIds: ["pi"],
+      mode: "add",
+      skipExisting: false,
+    });
+    assert.equal(batchForce.updatedCount, 1);
+    const piAfterForce = JSON.parse(
+      await readFile(path.join(fakeHome, ".pi", "agent", "mcp.json"), "utf8"),
+    );
+    assert.equal(piAfterForce.mcpServers.notion.url, "https://mcp.notion.com/mcp");
+
+    // Batch Remove removes selected servers from Cursor while preserving keep_native
+    const batchRm = await hub.batchApplyTargets({
+      ids: [notion.id, ssh.id],
+      targetIds: ["cursor"],
+      mode: "remove",
+    });
+    assert.equal(batchRm.updatedCount, 1);
+    const cursorAfterRm = JSON.parse(
+      await readFile(path.join(fakeHome, ".cursor", "mcp.json"), "utf8"),
+    );
+    assert.equal(cursorAfterRm.mcpServers.notion, undefined);
+    assert.equal(cursorAfterRm.mcpServers["ssh-mcp"], undefined);
+    assert.ok(cursorAfterRm.mcpServers.keep_native);
+  } finally {
+    await rm(tmpRoot, { recursive: true, force: true });
+  }
+});
+
+test("v2.1.0 imports all same-name MCP config variants with automatic aliases and clean ownership transfer", async () => {
+  const tmpRoot = await mkdtemp(path.join(os.tmpdir(), "mcp-hub-v210-"));
+  const fakeHome = path.join(tmpRoot, "home");
+  const dataDir = path.join(tmpRoot, "data");
+  await mkdir(path.join(fakeHome, ".codex"), { recursive: true });
+  await mkdir(path.join(fakeHome, ".pi", "agent"), { recursive: true });
+  await mkdir(path.join(fakeHome, ".cursor"), { recursive: true });
+
+  // Codex has HTTP `github`, Pi has stdio `github` (same name, DIFFERENT config!)
+  await writeFile(
+    path.join(fakeHome, ".codex", "config.toml"),
+    '[mcp_servers.github]\nurl = "https://api.githubcopilot.com/mcp/"\n',
+    "utf8",
+  );
+  await writeFile(
+    path.join(fakeHome, ".pi", "agent", "mcp.json"),
+    JSON.stringify({
+      mcpServers: {
+        github: { command: "npx", args: ["-y", "@modelcontextprotocol/server-github"] },
+      },
+    }),
+    "utf8",
+  );
+  await writeFile(
+    path.join(fakeHome, ".cursor", "mcp.json"),
+    JSON.stringify({ mcpServers: {} }),
+    "utf8",
+  );
+
+  try {
+    const hub = createHubController({
+      dataDir,
+      readSettings: async () => ({ autoBackup: true, excludeBuiltinMcp: true }),
+      home: fakeHome,
+      platform: "win32",
+    });
+
+    // 1. Overview discovers BOTH variants of `github` with suggested aliases!
+    const ov0 = await hub.buildOverview();
+    const ghCandidates = ov0.importCandidates.filter((c) => c.name === "github");
+    assert.equal(ghCandidates.length, 2);
+    assert.ok(ghCandidates.every((c) => c.hasVariants === true));
+    assert.deepEqual(ghCandidates.map((c) => c.suggestedAlias).sort(), ["Codex", "Pi"]);
+
+    // 2. Import ALL variants -> creates 2 cards with aliases, 0 pending changes!
+    const imp = await hub.importFromTarget({
+      sourceTargetId: "all",
+      selectedVariants: ghCandidates.map((c) => c.variantKey),
+    });
+    assert.equal(imp.added, 2);
+    assert.equal(imp.overview.summary.pendingChanges, 0);
+
+    const ghCodex = imp.overview.servers.find((s) => s.name === "github" && s.alias === "Codex");
+    const ghPi = imp.overview.servers.find((s) => s.name === "github" && s.alias === "Pi");
+    assert.ok(ghCodex && ghPi);
+    assert.equal(ghCodex.targetStatuses.codex, "synced");
+    assert.equal(ghCodex.targetStatuses.pi, "off");
+    assert.equal(ghPi.targetStatuses.pi, "synced");
+    assert.equal(ghPi.targetStatuses.codex, "off");
+
+    // 3. Apply Codex variant to Cursor -> Cursor gets HTTP, Pi keeps stdio untouched!
+    await hub.setServerTargets({ id: ghCodex.id, targets: ["codex", "cursor"] });
+    const applyCursor = await hub.applySingleServer({ id: ghCodex.id });
+    assert.equal(applyCursor.updatedCount, 1);
+    const cursorCfg = JSON.parse(await readFile(path.join(fakeHome, ".cursor", "mcp.json"), "utf8"));
+    const piCfg = JSON.parse(await readFile(path.join(fakeHome, ".pi", "agent", "mcp.json"), "utf8"));
+    assert.equal(cursorCfg.mcpServers.github.url, "https://api.githubcopilot.com/mcp/");
+    assert.equal(piCfg.mcpServers.github.command, "npx");
+
+    // 4. Explicitly choose Pi on Codex variant -> shows amber `pending-update`, applying transfers ownership cleanly!
+    const stagedOverwrite = await hub.setServerTargets({
+      id: ghCodex.id,
+      targets: ["codex", "cursor", "pi"],
+    });
+    assert.equal(
+      stagedOverwrite.servers.find((s) => s.id === ghCodex.id).targetStatuses.pi,
+      "pending-update",
+    );
+    const appliedTransfer = await hub.applySingleServer({ id: ghCodex.id });
+    assert.equal(appliedTransfer.updatedCount, 1);
+    assert.equal(appliedTransfer.overview.summary.pendingChanges, 0);
+    assert.equal(appliedTransfer.overview.servers.find((s) => s.id === ghCodex.id).targetStatuses.pi, "synced");
+    assert.equal(appliedTransfer.overview.servers.find((s) => s.id === ghPi.id).targetStatuses.pi, "off");
+  } finally {
+    await rm(tmpRoot, { recursive: true, force: true });
+  }
+});
+
+test("surgical Codex TOML parser & updater preserves comments, model settings, and unmanaged MCPs", () => {
+  const original = [
+    "# Top comment must survive",
+    'model = "gpt-5.4"',
+    "",
+    "[mcp_servers.keep_me]",
+    'command = "node"',
+    'args = ["keep.js"]',
+    "",
+    '[mcp_servers."ssh-mcp-server"]',
+    'command = "npx"',
+    'args = ["-y", "ssh-mcp"]',
+    "",
+    '[mcp_servers."ssh-mcp-server".env]',
+    'SSH_HOST = "10.0.0.1"',
+    "",
+    "[profiles.fast]",
+    'model_reasoning_effort = "low"',
+    "",
+  ].join("\n");
+
+  const parsed = parseCodexMcpServers(original);
+  assert.equal(Object.keys(parsed).length, 2);
+  assert.equal(parsed["ssh-mcp-server"].transport.env.SSH_HOST, "10.0.0.1");
+
+  const updated = updateCodexToml(
+    original,
+    {
+      "ssh-mcp-server": {
+        enabled: true,
+        transport: { type: "stdio", command: "npx", args: ["-y", "ssh-mcp@2"], env: { SSH_HOST: "10.0.0.2" } },
+      },
+      notion: {
+        enabled: true,
+        transport: { type: "http", url: "https://mcp.notion.com/mcp", headers: { "X-Team": "eng" } },
+      },
+    },
+    [],
+  );
+
+  assert.ok(updated.includes("# Top comment must survive"));
+  assert.ok(updated.includes('model = "gpt-5.4"'));
+  assert.ok(updated.includes("[profiles.fast]"));
+  assert.ok(updated.includes("[mcp_servers.keep_me]"));
+  assert.ok(updated.includes('SSH_HOST = "10.0.0.2"'));
+  assert.ok(updated.includes('url = "https://mcp.notion.com/mcp"'));
+
+  const reparsed = parseCodexMcpServers(updated);
+  assert.equal(Object.keys(reparsed).length, 3);
+  assert.deepEqual(reparsed["ssh-mcp-server"].transport.args, ["-y", "ssh-mcp@2"]);
+  assert.equal(reparsed.notion.transport.url, "https://mcp.notion.com/mcp");
+  assert.equal(reparsed.notion.transport.headers["X-Team"], "eng");
+
+  // Removing managed entry must not touch keep_me
+  const afterRemove = updateCodexToml(updated, {}, ["notion"]);
+  const reparsed2 = parseCodexMcpServers(afterRemove);
+  assert.equal(reparsed2.notion, undefined);
+  assert.ok(reparsed2.keep_me);
+});
+
+test("end-to-end HubController: scan, import, sync across Codex/Claude/AGY/OpenCode, preserve unmanaged, backup & restore", async () => {
+  const tmpRoot = await mkdtemp(path.join(os.tmpdir(), "mcp-hub-test-"));
+  const fakeHome = path.join(tmpRoot, "home");
+  const dataDir = path.join(tmpRoot, "data");
+  const projectDir = path.join(tmpRoot, "project");
+  await mkdir(path.join(fakeHome, ".codex"), { recursive: true });
+  await mkdir(path.join(fakeHome, ".gemini", "config"), { recursive: true });
+  await mkdir(path.join(fakeHome, ".cursor"), { recursive: true });
+  await mkdir(path.join(fakeHome, ".config", "opencode"), { recursive: true });
+  await mkdir(projectDir, { recursive: true });
+
+  // Seed existing native files with unmanaged entries and unrelated fields
+  const origCodex = '# My Codex\nmodel = "o3"\n\n[mcp_servers.handcrafted]\ncommand = "node"\nargs = ["hand.js"]\n';
+  await writeFile(path.join(fakeHome, ".codex", "config.toml"), origCodex, "utf8");
+  await writeFile(
+    path.join(fakeHome, ".claude.json"),
+    JSON.stringify(
+      {
+        userID: "u-123",
+        mcpServers: {
+          "existing-tool": { command: "npx", args: ["-y", "existing-mcp"] },
+          codexhost: { type: "http", url: "http://127.0.0.1:4398/mcp" },
+        },
+      },
+      null,
+      2,
+    ),
+    "utf8",
+  );
+  await writeFile(
+    path.join(fakeHome, ".gemini", "config", "mcp_config.json"),
+    JSON.stringify({ mcpServers: {} }, null, 2),
+    "utf8",
+  );
+  await writeFile(
+    path.join(fakeHome, ".config", "opencode", "opencode.json"),
+    JSON.stringify({ theme: "dark", mcp: {} }, null, 2),
+    "utf8",
+  );
+
+  try {
+    const settings = { autoBackup: true, skipLoopbackCodexhost: true, httpProbeTimeoutMs: 2000 };
+    const hub = createHubController({
+      dataDir,
+      readSettings: async () => settings,
+      home: fakeHome,
+      platform: "win32",
+    });
+
+    // 1. Scan & import from Claude Code
+    const imported = await hub.importFromTarget({
+      sourceTargetId: "claude-code",
+      assignTargets: ["codex", "claude-code", "antigravity", "opencode"],
+    });
+    assert.equal(imported.added, 2);
+
+    // Loopback server should NOT be auto-assigned to codex/antigravity/opencode
+    const loopback = imported.overview.servers.find((s) => s.name === "codexhost");
+    assert.equal(loopback.isLoopback, true);
+    assert.deepEqual(loopback.targets, ["claude-code"]);
+
+    // 2. Add a new HTTP MCP assigned to Codex, Antigravity, OpenCode
+    await hub.saveServer({
+      name: "docs-http",
+      description: "Remote docs",
+      enabled: true,
+      transport: { type: "http", url: "https://docs.example.com/mcp", headers: { "X-Key": "abc" } },
+      targets: ["codex", "antigravity", "opencode"],
+    });
+
+    // 3. Preview & apply sync
+    const preview = await hub.previewSync();
+    const codexDiff = preview.diffs.find((d) => d.targetId === "codex");
+    assert.deepEqual(codexDiff.adds.sort(), ["docs-http", "existing-tool"]);
+    assert.deepEqual(codexDiff.preservedUnmanaged, ["handcrafted"]);
+
+    const syncRes = await hub.applySync();
+    assert.equal(syncRes.errorCount, 0);
+    assert.ok(syncRes.updatedCount >= 3);
+
+    // Verify files written on disk
+    const nextCodex = await readFile(path.join(fakeHome, ".codex", "config.toml"), "utf8");
+    assert.ok(nextCodex.includes("# My Codex"));
+    assert.ok(nextCodex.includes("[mcp_servers.handcrafted]"));
+    assert.ok(nextCodex.includes("[mcp_servers.docs-http]"));
+
+    const nextAgy = JSON.parse(
+      await readFile(path.join(fakeHome, ".gemini", "config", "mcp_config.json"), "utf8"),
+    );
+    assert.equal(nextAgy.mcpServers["docs-http"].serverUrl, "https://docs.example.com/mcp");
+    assert.equal(nextAgy.mcpServers["existing-tool"].command, "npx");
+
+    const nextOpenCode = JSON.parse(
+      await readFile(path.join(fakeHome, ".config", "opencode", "opencode.json"), "utf8"),
+    );
+    assert.equal(nextOpenCode.theme, "dark");
+    assert.equal(nextOpenCode.mcp["existing-tool"].type, "local");
+    assert.deepEqual(nextOpenCode.mcp["existing-tool"].command, ["npx", "-y", "existing-mcp"]);
+    assert.equal(nextOpenCode.mcp["docs-http"].type, "remote");
+    assert.equal(nextOpenCode.mcp["docs-http"].url, "https://docs.example.com/mcp");
+
+    // 4. Disable `docs-http` and sync -> should remove managed key, keep unmanaged `handcrafted`
+    const docsServer = syncRes.overview.servers.find((s) => s.name === "docs-http");
+    await hub.toggleServer({ id: docsServer.id, enabled: false });
+    await hub.applySync();
+
+    const codexAfterDisable = parseCodexMcpServers(
+      await readFile(path.join(fakeHome, ".codex", "config.toml"), "utf8"),
+    );
+    assert.equal(codexAfterDisable["docs-http"], undefined);
+    assert.ok(codexAfterDisable.handcrafted);
+    assert.ok(codexAfterDisable["existing-tool"]);
+
+    // 5. Backups & restore
+    const { backups } = await hub.listBackups();
+    const codexBackups = backups.filter((b) => b.targetId === "codex");
+    assert.ok(codexBackups.length >= 1);
+    const oldestCodex = codexBackups[codexBackups.length - 1];
+    await hub.restoreBackup({ backupId: oldestCodex.id });
+    const restoredCodex = await readFile(path.join(fakeHome, ".codex", "config.toml"), "utf8");
+    assert.equal(restoredCodex, origCodex);
+
+    // 6. Project-level sync
+    const projRes = await hub.syncProject({
+      projectDir,
+      formatIds: ["project-mcp-json", "project-codex", "project-opencode"],
+    });
+    assert.equal(projRes.results.filter((r) => r.status === "updated").length, 3);
+    const projJson = JSON.parse(await readFile(path.join(projectDir, ".mcp.json"), "utf8"));
+    assert.ok(projJson.mcpServers["existing-tool"]);
+    assert.equal(projJson.mcpServers.codexhost, undefined, "Loopback MCP should not be exported to project");
+
+    // 7. HTTP probe with ephemeral server
+    const server = http.createServer((req, res) => {
+      if (req.url === "/auth") {
+        res.writeHead(401);
+        res.end("unauthorized");
+      } else {
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ jsonrpc: "2.0", id: 1, result: {} }));
+      }
+    });
+    await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const port = server.address().port;
+    try {
+      const okProbe = await hub.probeServer({
+        server: { transport: { type: "http", url: `http://127.0.0.1:${port}/mcp` } },
+      });
+      assert.equal(okProbe.ok, true);
+      assert.equal(okProbe.needsAuth, false);
+
+      const authProbe = await hub.probeServer({
+        server: { transport: { type: "http", url: `http://127.0.0.1:${port}/auth` } },
+      });
+      assert.equal(authProbe.ok, true);
+      assert.equal(authProbe.needsAuth, true);
+    } finally {
+      server.close();
+    }
+
+    // 8. Backend activate(ctx) contract check
+    const registered = new Map();
+    const dispose = await activate({
+      extensionId: "mcp-hub",
+      extensionDir: rootDir,
+      dataDir,
+      readSettings: async () => settings,
+      writeSettings: async (v) => v,
+      handle: (method, fn) => registered.set(method, fn),
+    });
+    assert.ok(registered.has("overview"));
+    assert.ok(registered.has("sync/apply"));
+    assert.equal(typeof dispose, "function");
+    await dispose();
+  } finally {
+    await rm(tmpRoot, { recursive: true, force: true });
+  }
+});
+
+test("packed dist zip passes CodexHost ZIP structure and CRC verification", async () => {
+  const manifest = JSON.parse(await readFile(path.join(rootDir, "manifest.json"), "utf8"));
+  const zipPath = path.join(rootDir, "dist", `${manifest.id}-${manifest.version}.zip`);
+  const zip = await readFile(zipPath);
+  const u16 = (off) => zip.readUInt16LE(off);
+  const u32 = (off) => zip.readUInt32LE(off);
+
+  // Locate EOCD
+  let eocd = zip.length - 22;
+  while (eocd >= 0 && u32(eocd) !== 0x06054b50) eocd--;
+  assert.ok(eocd >= 0, "EOCD signature missing");
+  const count = u16(eocd + 10);
+  const cdStart = u32(eocd + 16);
+  const cdSize = u32(eocd + 12);
+  assert.equal(cdStart + cdSize, eocd, "Central directory bounds invalid");
+  assert.ok(count >= 10);
+
+  const names = new Set();
+  let cur = cdStart;
+  for (let i = 0; i < count; i++) {
+    assert.equal(u32(cur), 0x02014b50);
+    const method = u16(cur + 10);
+    const crc = u32(cur + 16);
+    const compSize = u32(cur + 20);
+    const uncompSize = u32(cur + 24);
+    const nameLen = u16(cur + 28);
+    const localOff = u32(cur + 42);
+    const name = zip.subarray(cur + 46, cur + 46 + nameLen).toString("utf8");
+    assert.ok(!name.includes("\\"), `Backslash in ZIP entry: ${name}`);
+    names.add(name);
+
+    assert.equal(u32(localOff), 0x04034b50);
+    const dataOff = localOff + 30 + nameLen + u16(localOff + 28);
+    const comp = zip.subarray(dataOff, dataOff + compSize);
+    const raw = method === 0 ? comp : inflateRawSync(comp);
+    assert.equal(raw.length, uncompSize);
+    assert.equal(crc32(raw) >>> 0, crc);
+    cur += 46 + nameLen + u16(cur + 30) + u16(cur + 32);
+  }
+
+  assert.ok(names.has("manifest.json"), "manifest.json must be at ZIP root");
+  assert.ok(names.has("page/index.mjs"));
+  assert.ok(names.has("page/dom.mjs"));
+  assert.ok(names.has("page/modals.mjs"));
+  assert.ok(names.has("page/tabs/servers.mjs"));
+  assert.ok(names.has("page/tabs/targets.mjs"));
+  assert.ok(names.has("page/tabs/project-backups.mjs"));
+  assert.ok(names.has("widget/index.mjs"));
+  assert.ok(names.has("backend/index.mjs"));
+  assert.ok(names.has("assets/icon.png"));
+  assert.ok(names.has("assets/preview.png"));
+});
+
+test("v2.3.0 regression checks: unique same-ms backups, custom target owner cleanup, and project sync variant deduplication", async () => {
+  const tmpRoot = await mkdtemp(path.join(os.tmpdir(), "mcp-hub-v230-"));
+  const fakeHome = path.join(tmpRoot, "home");
+  const dataDir = path.join(tmpRoot, "data");
+  const projectDir = path.join(tmpRoot, "project");
+  const customPath = path.join(tmpRoot, "custom-agent.json");
+  await mkdir(fakeHome, { recursive: true });
+  await mkdir(projectDir, { recursive: true });
+  await writeFile(customPath, JSON.stringify({ mcpServers: {} }), "utf8");
+
+  try {
+    const hub = createHubController({
+      dataDir,
+      readSettings: async () => ({ autoBackup: true, excludeBuiltinMcp: true }),
+      home: fakeHome,
+      platform: "win32",
+    });
+
+    // 1. Add custom target, apply an MCP, then remove custom target -> managedOwnersByTarget must be cleaned
+    const ov1 = await hub.addCustomTarget({ name: "MyAgent", configPath: customPath, rootKey: "mcpServers" });
+    const customTarget = ov1.targets.find((t) => t.custom);
+    assert.ok(customTarget);
+
+    await hub.saveServer({
+      name: "shared-tool",
+      alias: "Alt",
+      enabled: true,
+      transport: { type: "http", url: "https://alt.example.com/mcp" },
+      targets: [customTarget.id],
+    });
+    const ov2 = await hub.saveServer({
+      name: "shared-tool",
+      alias: "",
+      enabled: true,
+      transport: { type: "http", url: "https://primary.example.com/mcp" },
+      targets: [customTarget.id],
+    });
+    const primarySrv = ov2.servers.find((s) => s.name === "shared-tool" && !s.alias);
+    await hub.applySingleServer({ id: primarySrv.id });
+
+    // Rapid consecutive project syncs produce distinct backup IDs
+    await hub.syncProject({ projectDir, formatIds: ["project-mcp-json"] });
+    const projRes2 = await hub.syncProject({ projectDir, formatIds: ["project-mcp-json"] });
+    const projRes3 = await hub.syncProject({ projectDir, formatIds: ["project-mcp-json"] });
+    assert.deepEqual(projRes2.duplicateNames, ["shared-tool"]);
+    assert.deepEqual(projRes3.duplicateNames, ["shared-tool"]);
+
+    const projJson = JSON.parse(await readFile(path.join(projectDir, ".mcp.json"), "utf8"));
+    assert.equal(
+      projJson.mcpServers["shared-tool"].url,
+      "https://primary.example.com/mcp",
+      "Project sync should prefer unaliased primary variant deterministically",
+    );
+
+    const { backups } = await hub.listBackups();
+    const projBackups = backups.filter((b) => b.targetId === "project-mcp-json");
+    assert.ok(projBackups.length >= 2, "Consecutive backups must not overwrite each other");
+    assert.equal(new Set(projBackups.map((b) => b.id)).size, projBackups.length);
+
+    // Removing custom target cleans managedKeysByTarget and managedOwnersByTarget
+    await hub.removeCustomTarget({ targetId: customTarget.id });
+    const rawState = JSON.parse(await readFile(path.join(dataDir, "hub-state.json"), "utf8"));
+    assert.equal(rawState.managedKeysByTarget[customTarget.id], undefined);
+    assert.equal(rawState.managedOwnersByTarget[customTarget.id], undefined);
+  } finally {
+    await rm(tmpRoot, { recursive: true, force: true });
+  }
+});
