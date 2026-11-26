@@ -23,10 +23,9 @@ test("manifest.json conforms to codexhost manifestVersion 2 contract and assets 
   assert.ok(manifest.details.en && manifest.details["zh-CN"]);
   assert.ok(Array.isArray(manifest.categories) && manifest.categories.length > 0);
   assert.equal(manifest.page.apiVersion, 1);
-  assert.equal(manifest.widget.apiVersion, 1);
+  assert.equal(manifest.widget, undefined);
   assert.equal(manifest.backend.apiVersion, 1);
   assert.notEqual(manifest.backend.entry, manifest.page.entry);
-  assert.notEqual(manifest.backend.entry, manifest.widget.entry);
 
   const pngSig = Buffer.from("89504e470d0a1a0a", "hex");
   const icon = await readFile(path.join(rootDir, manifest.icon));
@@ -47,7 +46,6 @@ test("manifest.json conforms to codexhost manifestVersion 2 contract and assets 
     "page/tabs/servers.mjs",
     "page/tabs/targets.mjs",
     "page/tabs/project-backups.mjs",
-    manifest.widget.entry,
     "shared/models.mjs",
     "shared/i18n.mjs",
   ]) {
@@ -800,7 +798,7 @@ test("packed dist zip passes CodexHost ZIP structure and CRC verification", asyn
   assert.ok(names.has("page/tabs/servers.mjs"));
   assert.ok(names.has("page/tabs/targets.mjs"));
   assert.ok(names.has("page/tabs/project-backups.mjs"));
-  assert.ok(names.has("widget/index.mjs"));
+  assert.equal(names.has("widget/index.mjs"), false);
   assert.ok(names.has("backend/index.mjs"));
   assert.ok(names.has("assets/icon.png"));
   assert.ok(names.has("assets/preview.png"));

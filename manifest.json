@@ -5,14 +5,14 @@
     "en": "MCP Hub",
     "zh-CN": "MCP 统一中心"
   },
-  "version": "2.3.0",
+  "version": "2.3.1",
   "description": {
     "en": "Unified MCP registry and multi-AI config synchronizer for Codex, Pi, Claude Code, Antigravity, Grok, Cursor, Copilot, CodeBuddy, OpenCode, and more.",
     "zh-CN": "跨 AI 统一 MCP 管理与同步中心：一次配置，一键同步到 Codex、Pi、Claude Code、Antigravity、Grok、Cursor、Copilot、CodeBuddy、OpenCode 等 16 家 AI 原生配置。"
   },
   "details": {
-    "en": "## Overview\n\n**MCP Hub** gives CodexHost a unified, persistent Model Context Protocol (MCP) management console across Desktop and Web.\n\n### Key Features\n\n- **Auto-Discovery (16 Built-in AIs)**: Scans existing MCP configurations from Codex (`~/.codex/config.toml`), Pi (`~/.pi/agent/mcp.json`), Claude Code (`~/.claude.json`), Antigravity (`~/.gemini/config/mcp_config.json`), Grok (`~/.grok/config.toml`), Cursor (`~/.cursor/mcp.json`), Copilot CLI (`~/.copilot/mcp-config.json`), CodeBuddy (`~/.codebuddy/mcp.json`), Claude Desktop, OpenCode, Qwen Code, Gemini CLI, Kiro, Kimi, WorkBuddy, and Qoder.\n- **Quick Config & Same-Name Variants**: One-click 2-step Quick Config wizard for bulk distribution, plus multi-variant alias support when different AIs share the same MCP name with distinct configs.\n- **One-Click Import & JSON Paste**: Import all local variants as-is from detected AIs or paste standard `mcpServers` / OpenCode JSON blocks.\n- **Surgical Safe Sync**: Preserves comments, unrelated settings, built-in vendor MCPs, and unmanaged native entries. Automatically backs up every target file before writing with one-click restore.\n- **Persistent Native Configs**: Writes directly to each AI's native configuration file, so your MCP setup remains intact even when CodexHost is closed.\n- **Floating Status Widget**: Lightweight bottom-right widget showing sync status with quick scan and one-click sync.",
-    "zh-CN": "## 功能简介\n\n**MCP 统一中心（MCP Hub）** 为 CodexHost 的 Desktop 与 Web 提供跨端统一的 MCP 配置管理与多 AI 同步界面。\n\n### 核心能力\n\n- **自动扫描 16 家本机 AI**：自动识别 Codex（`~/.codex/config.toml`）、Pi（`~/.pi/agent/mcp.json`）、Claude Code（`~/.claude.json`）、Antigravity（`~/.gemini/config/mcp_config.json`）、Grok（`~/.grok/config.toml`）、Cursor（`~/.cursor/mcp.json`）、Copilot CLI（`~/.copilot/mcp-config.json`）、CodeBuddy（`~/.codebuddy/mcp.json`）、Claude Desktop、OpenCode、Qwen Code、Gemini CLI、Kiro、Kimi、WorkBuddy、Qoder 等原生 MCP 配置，并支持自定义路径与自定义目标。\n- **快速配置向导 & 同名多配置别名**：支持右上角两步式「快速配置」批量下发/移除，也支持同一 MCP 名称下导入并管理多套不同配置（自动附带别名标识），互不误覆盖。\n- **一键汇总导入 & JSON 粘贴**：按本机真实配置现状一键导入，或直接粘贴标准 `mcpServers` / OpenCode JSON。\n- **安全增量同步 + 自动备份**：卡片内单条即时应用与撤销，保留原文件注释、模型设置、官方内置 MCP 与非托管条目；每次写入前自动备份并支持一键回滚。\n- **脱离 CodexHost 依然生效**：直接写入各家 AI 原生配置文件，关闭或卸载 CodexHost 后配置依然保留。\n- **悬浮状态挂件**：主窗口右下角轻量挂件，随时查看同步状态并一键刷新或同步。"
+    "en": "## Overview\n\n**MCP Hub** gives CodexHost a unified, persistent Model Context Protocol (MCP) management console across Desktop and Web.\n\n### Key Features\n\n- **Auto-Discovery (16 Built-in AIs)**: Scans existing MCP configurations from Codex (`~/.codex/config.toml`), Pi (`~/.pi/agent/mcp.json`), Claude Code (`~/.claude.json`), Antigravity (`~/.gemini/config/mcp_config.json`), Grok (`~/.grok/config.toml`), Cursor (`~/.cursor/mcp.json`), Copilot CLI (`~/.copilot/mcp-config.json`), CodeBuddy (`~/.codebuddy/mcp.json`), Claude Desktop, OpenCode, Qwen Code, Gemini CLI, Kiro, Kimi, WorkBuddy, and Qoder.\n- **Quick Config & Same-Name Variants**: One-click 2-step Quick Config wizard for bulk distribution, plus multi-variant alias support when different AIs share the same MCP name with distinct configs.\n- **One-Click Import & JSON Paste**: Import all local variants as-is from detected AIs or paste standard `mcpServers` / OpenCode JSON blocks.\n- **Surgical Safe Sync**: Preserves comments, unrelated settings, built-in vendor MCPs, and unmanaged native entries. Automatically backs up every target file before writing with one-click restore.\n- **Persistent Native Configs**: Writes directly to each AI's native configuration file, so your MCP setup remains intact even when CodexHost is closed.",
+    "zh-CN": "## 功能简介\n\n**MCP 统一中心（MCP Hub）** 为 CodexHost 的 Desktop 与 Web 提供跨端统一的 MCP 配置管理与多 AI 同步界面。\n\n### 核心能力\n\n- **自动扫描 16 家本机 AI**：自动识别 Codex（`~/.codex/config.toml`）、Pi（`~/.pi/agent/mcp.json`）、Claude Code（`~/.claude.json`）、Antigravity（`~/.gemini/config/mcp_config.json`）、Grok（`~/.grok/config.toml`）、Cursor（`~/.cursor/mcp.json`）、Copilot CLI（`~/.copilot/mcp-config.json`）、CodeBuddy（`~/.codebuddy/mcp.json`）、Claude Desktop、OpenCode、Qwen Code、Gemini CLI、Kiro、Kimi、WorkBuddy、Qoder 等原生 MCP 配置，并支持自定义路径与自定义目标。\n- **快速配置向导 & 同名多配置别名**：支持右上角两步式「快速配置」批量下发/移除，也支持同一 MCP 名称下导入并管理多套不同配置（自动附带别名标识），互不误覆盖。\n- **一键汇总导入 & JSON 粘贴**：按本机真实配置现状一键导入，或直接粘贴标准 `mcpServers` / OpenCode JSON。\n- **安全增量同步 + 自动备份**：卡片内单条即时应用与撤销，保留原文件注释、模型设置、官方内置 MCP 与非托管条目；每次写入前自动备份并支持一键回滚。\n- **脱离 CodexHost 依然生效**：直接写入各家 AI 原生配置文件，关闭或卸载 CodexHost 后配置依然保留。"
   },
   "author": "CodexHost MCP Hub",
   "categories": [
@@ -25,19 +25,6 @@
     "assets/preview.png"
   ],
   "settingsSchema": [
-    {
-      "key": "showWidget",
-      "type": "boolean",
-      "label": {
-        "en": "Show Floating Widget",
-        "zh-CN": "显示主窗口悬浮挂件"
-      },
-      "description": {
-        "en": "Display a compact MCP sync status pill in the bottom-right corner of Desktop and Web.",
-        "zh-CN": "在 Desktop 与 Web 主窗口右下角显示轻量 MCP 同步状态挂件。"
-      },
-      "default": true
-    },
     {
       "key": "autoBackup",
       "type": "boolean",
@@ -102,11 +89,6 @@
       "en": "MCP Hub",
       "zh-CN": "MCP 统一中心"
     }
-  },
-  "widget": {
-    "apiVersion": 1,
-    "entry": "widget/index.mjs",
-    "style": "widget/style.css"
   },
   "backend": {
     "apiVersion": 1,

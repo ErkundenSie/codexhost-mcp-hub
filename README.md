@@ -17,7 +17,6 @@
 - **防套娃保护**：自动识别指向本机 CodexHost（`127.0.0.1:4398/mcp`）的回环 MCP，避免误同步到全部内部 AI。
 - **项目级配置同步**：支持按项目目录扫描或写入 `.mcp.json`、`.cursor/mcp.json`、`.codex/config.toml`、`opencode.json`。
 - **HTTP / SSE 连通性测试**：快速探测远程 MCP 端点可达性与鉴权状态。
-- **主窗口悬浮挂件（`widget`）**：右下角轻量状态胶囊（仅交互区响应点击，不遮挡页面），可在插件详情设置中关闭。
 
 ## 目录结构
 
@@ -39,9 +38,6 @@ codexhost-mcp-hub/
 │   │   ├── targets.mjs           # AI 配置标签页
 │   │   └── project-backups.mjs   # 项目与备份标签页
 │   └── style.css                 # 使用 --cx-page-* 主题变量（支持浅/深色）
-├── widget/
-│   ├── index.mjs                 # Desktop + Web 主窗口挂件入口 (mount)
-│   └── style.css                 # 仅交互区 pointer-events: auto
 ├── backend/
 │   ├── index.mjs                 # 共享 Host 单实例 Node 后端入口 (activate)
 │   ├── adapters.mjs              # 16 家内置 AI + 自定义目标 + 项目级适配器
@@ -74,11 +70,11 @@ node --test test/hub.test.mjs
 
 1. 打开 CodexHost Desktop（**设置 → 插件**）或 CodexHost Web（左侧一级导航 **插件**）；
 2. 若已安装旧版 `mcp-hub`，请先卸载旧版（或通过插件详情更新）；
-3. 点击 **导入插件** 并上传打包好的 `dist/mcp-hub-2.3.0.zip`；
+3. 点击 **导入插件** 并上传打包好的 `dist/mcp-hub-2.3.1.zip`；
 4. 启用 **「MCP 统一中心」** 后，即可在顶部标签栏或「插件页面」打开配置页。
 
 ## 发布到 GitHub
 
 1. 在 GitHub 推送本仓库源码（`dist/` 默认已忽略）；
 2. 运行 `node scripts/pack.mjs` 生成 `dist/mcp-hub-<version>.zip`；
-3. 创建 GitHub Release（例如 tag `v2.3.0`），将 `.zip` 作为 Release 资产上传，即可通过仓库链接或 `.zip` 分发给其他用户。
+3. 创建 GitHub Release（例如 tag `v2.3.1`），将 `.zip` 作为 Release 资产上传，即可通过仓库链接或 `.zip` 分发给其他用户。

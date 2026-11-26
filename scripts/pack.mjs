@@ -19,7 +19,6 @@ const INCLUDE_PATHS = [
   "assets",
   "shared",
   "page",
-  "widget",
   "backend",
 ];
 
