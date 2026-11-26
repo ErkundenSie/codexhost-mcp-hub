@@ -2,6 +2,10 @@
 
 在 CodexHost 的 **Desktop** 与 **Web** 之间提供一个跨端统一的 MCP（Model Context Protocol）管理与多 AI 配置同步插件：一次配置 MCP，一键安全同步到本机各家 AI 的原生配置文件中。即使后续关闭或卸载 CodexHost，各家 AI 的 MCP 配置依然完整保留。
 
+## 界面预览
+
+![MCP 统一中心界面预览](assets/preview.png)
+
 ## 核心功能
 
 - **自动扫描 16 家本机 AI**：自动检测并读取 Codex、Pi、Claude Code、Antigravity (`agy`)、Grok、Cursor / Cursor CLI、GitHub Copilot CLI、CodeBuddy、Claude Desktop、OpenCode、Qwen Code、Gemini CLI、Kiro CLI、Kimi Code、WorkBuddy、Qoder 等原生 MCP 配置，并支持自定义路径与自定义 JSON 目标。
@@ -70,11 +74,11 @@ node --test test/hub.test.mjs
 
 1. 打开 CodexHost Desktop（**设置 → 插件**）或 CodexHost Web（左侧一级导航 **插件**）；
 2. 若已安装旧版 `mcp-hub`，请先卸载旧版（或通过插件详情更新）；
-3. 点击 **导入插件** 并上传打包好的 `dist/mcp-hub-2.3.1.zip`；
+3. 点击 **导入插件** 并上传打包好的 `dist/mcp-hub-2.3.2.zip`；
 4. 启用 **「MCP 统一中心」** 后，即可在顶部标签栏或「插件页面」打开配置页。
 
 ## 发布到 GitHub
 
 1. 在 GitHub 推送本仓库源码（`dist/` 默认已忽略）；
 2. 运行 `node scripts/pack.mjs` 生成 `dist/mcp-hub-<version>.zip`；
-3. 创建 GitHub Release（例如 tag `v2.3.1`），将 `.zip` 作为 Release 资产上传，即可通过仓库链接或 `.zip` 分发给其他用户。
+3. 创建 GitHub Release（例如 tag `v2.3.2`），将 `.zip` 作为 Release 资产上传，即可通过仓库链接或 `.zip` 分发给其他用户。
