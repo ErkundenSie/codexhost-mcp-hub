@@ -1237,6 +1237,9 @@ export function createHubController({
         state.targetPathOverrides[targetId] = trimmed;
       }
       await store.save(state);
+      baselineByTarget.delete(targetId);
+      const scanned = await scanTargets(state);
+      await syncWatchers(state, scanned);
       return buildOverview();
     });
   }
@@ -1259,6 +1262,8 @@ export function createHubController({
         state.enabledTargets.push(id);
       }
       await store.save(state);
+      const scanned = await scanTargets(state);
+      await syncWatchers(state, scanned);
       return buildOverview();
     });
   }
@@ -1273,10 +1278,13 @@ export function createHubController({
       delete state.managedKeysByTarget[targetId];
       delete state.managedOwnersByTarget[targetId];
       delete state.targetPathOverrides[targetId];
+      baselineByTarget.delete(targetId);
       for (const s of state.servers) {
         s.targets = (s.targets ?? []).filter((id) => id !== targetId);
       }
       await store.save(state);
+      const scanned = await scanTargets(state);
+      await syncWatchers(state, scanned);
       return buildOverview();
     });
   }
@@ -1369,9 +1377,11 @@ export function createHubController({
   async function restoreBackup({ backupId }) {
     return serialize(async () => {
       const state = await store.load();
-      const targetMatch = resolveTargets(state).find((t) =>
-        store.backupsDir && backupId.includes(t.id.replace(/[^a-zA-Z0-9_-]/g, "_")),
-      );
+      const safeBackupId = String(backupId ?? "").trim();
+      const targetMatch = resolveTargets(state).find((t) => {
+        const safeId = t.id.replace(/[^a-zA-Z0-9_-]/g, "_");
+        return safeBackupId.endsWith(`_${safeId}`);
+      });
       if (targetMatch) watcher.markSelfWrite(targetMatch.id, 1800);
       const meta = await store.restoreBackup(backupId);
       const restoredTarget = resolveTargets(state).find((t) => t.id === meta.targetId);

@@ -17,7 +17,7 @@ export function renderProjectAndBackupsTab(ctx) {
   });
 
   const formatOptions = [
-    ["project-mcp-json", ".mcp.json", "Claude Code / 通用标准"],
+    ["project-mcp-json", ".mcp.json", t("projectFormatStandardSub")],
     ["project-cursor", ".cursor/mcp.json", "Cursor / Cursor CLI"],
     ["project-codex", ".codex/config.toml", "Codex CLI"],
     ["project-opencode", "opencode.json", "OpenCode"],

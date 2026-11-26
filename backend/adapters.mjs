@@ -5,7 +5,7 @@
  * CodexHost strips `process.env` in `ExtensionBackendProcess`.
  */
 
-import { mkdir, readFile, rename, stat, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { cleanStringMap, normalizeTransport } from "../shared/models.mjs";
@@ -248,7 +248,11 @@ export async function atomicWriteText(filePath, content) {
     await rename(tempPath, filePath);
   } catch {
     // Fallback on Windows if rename collides with a locked file
-    await writeFile(filePath, content, "utf8");
+    try {
+      await writeFile(filePath, content, "utf8");
+    } finally {
+      await rm(tempPath, { force: true }).catch(() => {});
+    }
   }
 }
 

@@ -1,14 +1,17 @@
 import assert from "node:assert/strict";
 import http from "node:http";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { crc32, inflateRawSync } from "node:zlib";
 
+import { atomicWriteText } from "../backend/adapters.mjs";
 import { activate, createHubController } from "../backend/index.mjs";
 import { parseCodexMcpServers, updateCodexToml } from "../backend/toml.mjs";
+import { McpFileWatcher } from "../backend/watcher.mjs";
+import { MESSAGES } from "../shared/i18n.mjs";
 import { detectBuiltinMcp, isCodexhostLoopbackServer, parseMcpJsonInput } from "../shared/models.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -1071,4 +1074,236 @@ test("v2.4.0 auto-sync: existing-only scope, selected MCP filter, primary mode, 
     hub.dispose();
     await rm(tmpRoot, { recursive: true, force: true });
   }
+});
+
+test("McpFileWatcher: real fs.watch debounce coalescing, atomic rename saves, self-write suppression, and target updates", async () => {
+  const tmpRoot = await mkdtemp(path.join(os.tmpdir(), "mcp-hub-watcher-"));
+  const dirA = path.join(tmpRoot, "dirA");
+  const dirB = path.join(tmpRoot, "dirB");
+  await mkdir(dirA, { recursive: true });
+  await mkdir(dirB, { recursive: true });
+  const fileA = path.join(dirA, "mcp.json");
+  const fileB = path.join(dirB, "config.json");
+  await writeFile(fileA, "{}", "utf8");
+  await writeFile(fileB, "{}", "utf8");
+
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  const waitFor = async (pred, timeoutMs = 2000) => {
+    const start = Date.now();
+    while (Date.now() - start < timeoutMs) {
+      if (pred()) return true;
+      await sleep(30);
+    }
+    return false;
+  };
+
+  const events = [];
+  const watcher = new McpFileWatcher({
+    debounceMs: 80,
+    onTargetChanged: (id) => {
+      events.push(id);
+    },
+  });
+
+  try {
+    watcher.setTargets([{ id: "alpha", configPath: fileA }]);
+    assert.equal(watcher.dirWatchers.size, 1);
+
+    // 1. Rapid burst writes + atomic rename coalesce into 1 notification; unrelated sibling files are ignored
+    await writeFile(path.join(dirA, "unrelated.json"), '{"x":1}', "utf8");
+    await writeFile(fileA, '{"v":1}', "utf8");
+    await atomicWriteText(fileA, '{"v":2}');
+    const gotFirst = await waitFor(() => events.length >= 1);
+    assert.equal(gotFirst, true, "Watcher should trigger on atomic rename write");
+    await sleep(140);
+    assert.deepEqual(events, ["alpha"], "Burst writes should coalesce into a single debounced event");
+
+    // 2. Self-write suppression ignores writes during holdMs window
+    events.length = 0;
+    watcher.markSelfWrite("alpha", 500);
+    await atomicWriteText(fileA, '{"v":3}');
+    await sleep(220);
+    assert.deepEqual(events, [], "Suppressed self-write must not trigger callback");
+
+    // 3. Dynamically updating targets adds dirB and closes dirA cleanly
+    watcher.setTargets([{ id: "beta", configPath: fileB }]);
+    assert.equal(watcher.dirWatchers.size, 1);
+    await atomicWriteText(fileB, '{"b":1}');
+    const gotBeta = await waitFor(() => events.includes("beta"));
+    assert.equal(gotBeta, true, "Updated target directory should trigger watcher");
+
+    // Verify no leftover .mcphub.tmp.* files exist after atomic writes
+    const filesInA = await readdir(dirA);
+    const filesInB = await readdir(dirB);
+    assert.equal(filesInA.some((f) => f.includes(".mcphub.tmp.")), false);
+    assert.equal(filesInB.some((f) => f.includes(".mcphub.tmp.")), false);
+  } finally {
+    watcher.dispose();
+    assert.equal(watcher.dirWatchers.size, 0);
+    await rm(tmpRoot, { recursive: true, force: true });
+  }
+});
+
+test("auto-sync advanced branches & regressions: single removal, broadcast scope, variant isolation, dynamic watcher refresh, and backup suffix matching", async () => {
+  const tmpRoot = await mkdtemp(path.join(os.tmpdir(), "mcp-hub-adv-"));
+  const fakeHome = path.join(tmpRoot, "home");
+  const dataDir = path.join(tmpRoot, "data");
+  await mkdir(path.join(fakeHome, ".codex"), { recursive: true });
+  await mkdir(path.join(fakeHome, ".pi", "agent"), { recursive: true });
+  await mkdir(path.join(fakeHome, ".copilot"), { recursive: true });
+
+  const codexFile = path.join(fakeHome, ".codex", "config.toml");
+  const piFile = path.join(fakeHome, ".pi", "agent", "mcp.json");
+  const copilotFile = path.join(fakeHome, ".copilot", "mcp-config.json");
+
+  // Codex and Pi share `shared_mcp` (same config) AND have DIFFERENT variants of `github`;
+  // Copilot initially has neither.
+  await writeFile(
+    codexFile,
+    [
+      "[mcp_servers.shared_mcp]",
+      'url = "https://shared.example.com/v1"',
+      "",
+      "[mcp_servers.github]",
+      'url = "https://github.codex.example.com/mcp"',
+      "",
+    ].join("\n"),
+    "utf8",
+  );
+  await writeFile(
+    piFile,
+    JSON.stringify(
+      {
+        mcpServers: {
+          shared_mcp: { url: "https://shared.example.com/v1" },
+          github: { command: "npx", args: ["-y", "local-github-mcp"] },
+        },
+      },
+      null,
+      2,
+    ),
+    "utf8",
+  );
+  await writeFile(copilotFile, JSON.stringify({ mcpServers: {} }, null, 2), "utf8");
+
+  const hub = createHubController({
+    dataDir,
+    readSettings: async () => ({ autoBackup: true, excludeBuiltinMcp: true }),
+    home: fakeHome,
+    platform: "win32",
+    watchDebounceMs: 60,
+  });
+
+  try {
+    await hub.importFromTarget({ sourceTargetId: "all" });
+
+    // Enable auto-sync with broadcast scope (all-selected) and syncRemovals = true
+    const ovOn = await hub.setAutoSyncConfig({
+      enabled: true,
+      mode: "bidirectional",
+      updateScope: "all-selected",
+      mcpScope: "all",
+      targetIds: ["codex", "pi", "copilot"],
+      syncAdditions: true,
+      syncUpdates: true,
+      syncRemovals: true,
+    });
+    assert.equal(ovOn.autoSync.watchingCount, 3);
+
+    // 1. Update `shared_mcp` in Codex with `all-selected` -> updates Pi AND broadcasts to Copilot!
+    await writeFile(
+      codexFile,
+      [
+        "[mcp_servers.shared_mcp]",
+        'url = "https://shared.example.com/v2"',
+        "",
+        "[mcp_servers.github]",
+        'url = "https://github.codex.example.com/mcp-v2"',
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+    await hub.handleWatchedTargetChange("codex");
+
+    const piAfterUpdate = JSON.parse(await readFile(piFile, "utf8"));
+    const copilotAfterUpdate = JSON.parse(await readFile(copilotFile, "utf8"));
+    assert.equal(piAfterUpdate.mcpServers.shared_mcp.url, "https://shared.example.com/v2");
+    assert.equal(copilotAfterUpdate.mcpServers.shared_mcp.url, "https://shared.example.com/v2");
+    // Variant isolation: Pi's distinct stdio `github` must NOT be overwritten by Codex's HTTP `github`!
+    assert.equal(
+      piAfterUpdate.mcpServers.github.command,
+      "npx",
+      "Distinct same-name variant on Pi must remain isolated",
+    );
+
+    // 2. Single-MCP removal (`syncRemovals: true`): remove `shared_mcp` from Codex -> removes from Pi & Copilot
+    await writeFile(
+      codexFile,
+      [
+        "[mcp_servers.github]",
+        'url = "https://github.codex.example.com/mcp-v2"',
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+    const rmRes = await hub.handleWatchedTargetChange("codex");
+    assert.equal(rmRes.propagated, 2);
+    const piAfterRm = JSON.parse(await readFile(piFile, "utf8"));
+    const copilotAfterRm = JSON.parse(await readFile(copilotFile, "utf8"));
+    assert.equal(piAfterRm.mcpServers.shared_mcp, undefined);
+    assert.equal(copilotAfterRm.mcpServers.shared_mcp, undefined);
+    assert.equal(piAfterRm.mcpServers.github.command, "npx");
+
+    // 3. Adding & removing a custom target dynamically updates active watcher count
+    const customDir = path.join(tmpRoot, "custom-agent-dir");
+    await mkdir(customDir, { recursive: true });
+    const customFile = path.join(customDir, "mcp.json");
+    await writeFile(customFile, JSON.stringify({ mcpServers: {} }), "utf8");
+    await hub.setAutoSyncConfig({ targetIds: null });
+    const ovAddCustom = await hub.addCustomTarget({ name: "CustomWatch", configPath: customFile });
+    assert.equal(ovAddCustom.autoSync.watchingCount, 4);
+    const customId = ovAddCustom.targets.find((t) => t.custom).id;
+    const ovRmCustom = await hub.removeCustomTarget({ targetId: customId });
+    assert.equal(ovRmCustom.autoSync.watchingCount, 3);
+
+    // 4. Restoring a `copilot` backup succeeds cleanly without falsely matching `pi` substring
+    const { backups } = await hub.listBackups();
+    const copilotBackup = backups.find((b) => b.targetId === "copilot");
+    assert.ok(copilotBackup);
+    const restored = await hub.restoreBackup({ backupId: copilotBackup.id });
+    assert.equal(restored.restored.targetId, "copilot");
+  } finally {
+    hub.dispose();
+    await rm(tmpRoot, { recursive: true, force: true });
+  }
+});
+
+test("i18n dictionaries have 1:1 zh-CN/en key parity and all frontend t() calls resolve to defined keys", async () => {
+  const zhKeys = new Set(Object.keys(MESSAGES["zh-CN"]));
+  const enKeys = new Set(Object.keys(MESSAGES.en));
+
+  const missingInEn = [...zhKeys].filter((k) => !enKeys.has(k));
+  const missingInZh = [...enKeys].filter((k) => !zhKeys.has(k));
+  assert.deepEqual(missingInEn, [], `Keys missing in en dictionary: ${missingInEn.join(", ")}`);
+  assert.deepEqual(missingInZh, [], `Keys missing in zh-CN dictionary: ${missingInZh.join(", ")}`);
+
+  const pageFiles = [
+    "page/index.mjs",
+    "page/modals.mjs",
+    "page/tabs/servers.mjs",
+    "page/tabs/targets.mjs",
+    "page/tabs/autosync.mjs",
+    "page/tabs/project-backups.mjs",
+  ];
+  const unknownKeys = [];
+  for (const rel of pageFiles) {
+    const src = await readFile(path.join(rootDir, rel), "utf8");
+    for (const m of src.matchAll(/\bt\(\s*["']([a-zA-Z0-9_]+)["']/g)) {
+      const key = m[1];
+      if (!zhKeys.has(key) || !enKeys.has(key)) {
+        unknownKeys.push(`${rel}: ${key}`);
+      }
+    }
+  }
+  assert.deepEqual(unknownKeys, [], `Undefined i18n keys referenced in page/: ${unknownKeys.join(", ")}`);
 });

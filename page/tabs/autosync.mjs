@@ -1,8 +1,66 @@
 /**
- * "Auto-Sync" tab renderer: real-time file-watcher settings, propagation scope, MCP filter, and activity logs.
+ * "Auto-Sync" tab renderer: modular status hero, 2-column strategy & triggers bento,
+ * fluid AI pill chips + MCP filter scope card, and live activity logs.
  */
 
 import { el } from "../dom.mjs";
+
+const SVG_NS = "http://www.w3.org/2000/svg";
+
+function svgEl(tag, attrs = {}, children = []) {
+  const node = document.createElementNS(SVG_NS, tag);
+  for (const [k, v] of Object.entries(attrs)) {
+    if (v !== undefined && v !== null) node.setAttribute(k, String(v));
+  }
+  for (const child of children) {
+    if (child) node.appendChild(child);
+  }
+  return node;
+}
+
+function makeSyncIcon() {
+  return svgEl(
+    "svg",
+    {
+      width: 19,
+      height: 19,
+      viewBox: "0 0 24 24",
+      fill: "none",
+      stroke: "currentColor",
+      "stroke-width": 2,
+      "stroke-linecap": "round",
+      "stroke-linejoin": "round",
+      "aria-hidden": "true",
+    },
+    [
+      svgEl("path", { d: "M21 12a9 9 0 0 0-9-9 9.75 9.75 0 0 0-6.74 2.74L3 8" }),
+      svgEl("path", { d: "M3 3v5h5" }),
+      svgEl("path", { d: "M3 12a9 9 0 0 0 9 9 9.75 9.75 0 0 0 6.74-2.74L21 16" }),
+      svgEl("path", { d: "M16 16h5v5" }),
+    ],
+  );
+}
+
+function makeShieldIcon() {
+  return svgEl(
+    "svg",
+    {
+      width: 13,
+      height: 13,
+      viewBox: "0 0 24 24",
+      fill: "none",
+      stroke: "currentColor",
+      "stroke-width": 2.2,
+      "stroke-linecap": "round",
+      "stroke-linejoin": "round",
+      "aria-hidden": "true",
+    },
+    [
+      svgEl("path", { d: "M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" }),
+      svgEl("path", { d: "m9 12 2 2 4-4" }),
+    ],
+  );
+}
 
 function formatShortTime(iso) {
   if (!iso) return "";
@@ -35,6 +93,7 @@ export function renderAutoSyncTab(ctx) {
   );
   const selectedMcpSet = new Set(cfg.selectedMcpNames ?? []);
   const selectedTargetSet = new Set(cfg.targetIds ?? []);
+  const primaryTarget = managed.find((x) => x.id === cfg.primaryTargetId) || managed[0];
 
   async function patchConfig(patch) {
     try {
@@ -51,52 +110,88 @@ export function renderAutoSyncTab(ctx) {
       ? t("autoSyncStatusOnScoped", { mcps: selectedMcpSet.size, count: selectedTargetSet.size })
       : t("autoSyncStatusOn", { count: selectedTargetSet.size });
 
-  const configPanel = el("div", { className: "mh-panel" }, [
-    el("div", { className: "mh-panel-head" }, [
-      el("div", {}, [
-        el("h3", { text: t("autoSyncPanelTitle") }),
-        el("p", { text: t("autoSyncPanelDesc") }),
-      ]),
-      el("div", { className: "mh-toggle-pill" }, [
-        el("span", { className: `mh-status-pill ${cfg.enabled ? "is-on" : ""}` }, [
-          cfg.enabled ? el("span", { className: "mh-live-dot" }) : null,
-          el("span", { text: statusText }),
+  const modeSummary =
+    cfg.mode === "primary"
+      ? t("autoSyncSummaryPrimary", { name: primaryTarget?.shortName || primaryTarget?.name || "-" })
+      : t("autoSyncSummaryBi");
+  const scopeSummary =
+    cfg.updateScope === "all-selected" ? t("autoSyncSummaryAll") : t("autoSyncSummaryExisting");
+  const mcpSummary =
+    cfg.mcpScope === "selected"
+      ? t("autoSyncSummaryMcpScoped", { count: selectedMcpSet.size })
+      : t("autoSyncSummaryMcpAll", { count: uniqueMcpNames.length });
+
+  // 1. Hero Status Card
+  const heroCard = el("div", { className: "mh-as-card mh-as-hero" }, [
+    el("div", { className: "mh-as-hero-top" }, [
+      el("div", { className: "mh-as-hero-left" }, [
+        el("div", { className: `mh-as-hero-icon ${cfg.enabled ? "is-on" : ""}` }, [makeSyncIcon()]),
+        el("div", { className: "mh-as-hero-copy" }, [
+          el("div", { className: "mh-as-hero-title-row" }, [
+            el("h3", { text: t("autoSyncPanelTitle") }),
+            el("span", { className: `mh-status-pill ${cfg.enabled ? "is-on" : ""}` }, [
+              cfg.enabled ? el("span", { className: "mh-live-dot" }) : null,
+              el("span", { text: statusText }),
+            ]),
+          ]),
+          el("p", { className: "mh-as-hero-desc", text: t("autoSyncPanelDesc") }),
         ]),
-        el(
-          "button",
-          {
-            className: `mh-toggle-btn ${cfg.enabled ? "is-on" : ""}`,
-            role: "switch",
-            "aria-checked": String(Boolean(cfg.enabled)),
-            onClick: () => patchConfig({ enabled: !cfg.enabled }),
-          },
-          [el("span", { className: "mh-toggle-thumb" })],
-        ),
+      ]),
+      el(
+        "button",
+        {
+          className: `mh-toggle-btn mh-toggle-lg ${cfg.enabled ? "is-on" : ""}`,
+          role: "switch",
+          "aria-checked": String(Boolean(cfg.enabled)),
+          "aria-label": t("autoSyncPanelTitle"),
+          onClick: () => patchConfig({ enabled: !cfg.enabled }),
+        },
+        [el("span", { className: "mh-toggle-thumb" })],
+      ),
+    ]),
+    el("div", { className: "mh-as-hero-summary" }, [
+      el("div", { className: "mh-as-summary-pills" }, [
+        el("span", { className: "mh-as-meta-chip", text: modeSummary }),
+        el("span", { className: "mh-as-meta-sep", text: "·" }),
+        el("span", { className: "mh-as-meta-chip", text: scopeSummary }),
+        el("span", { className: "mh-as-meta-sep", text: "·" }),
+        el("span", { className: "mh-as-meta-chip", text: mcpSummary }),
+      ]),
+      el("div", { className: "mh-as-guard-inline" }, [
+        el("span", { className: "mh-as-guard-icon" }, [makeShieldIcon()]),
+        el("span", { text: t("autoSyncGuardStrip") }),
       ]),
     ]),
-    el("div", { className: "mh-setting-rows" }, [
-      // Row 1: Sync Mode
-      el("div", { className: "mh-setting-row" }, [
-        el("div", { className: "mh-row-label", text: t("autoSyncModeLabel") }),
-        el("div", { className: "mh-mode-cards" }, [
+  ]);
+
+  // 2A. Strategy Card (Left of Bento)
+  const strategyCard = el("div", { className: "mh-as-card" }, [
+    el("div", { className: "mh-as-card-head" }, [
+      el("span", { className: "mh-as-card-title", text: t("autoSyncStrategyTitle") }),
+      el("span", { className: "mh-as-card-sub", text: t("autoSyncStrategySub") }),
+    ]),
+    el("div", { className: "mh-as-card-body" }, [
+      el("div", { className: "mh-as-field-group" }, [
+        el("div", { className: "mh-as-field-label", text: t("autoSyncModeLabel") }),
+        el("div", { className: "mh-as-opt-grid" }, [
           el(
             "button",
             {
-              className: `mh-mode-card ${cfg.mode === "bidirectional" ? "is-active" : ""}`,
+              className: `mh-as-opt ${cfg.mode === "bidirectional" ? "is-active" : ""}`,
               onClick: () => patchConfig({ mode: "bidirectional" }),
             },
             [
-              el("div", { className: "mh-mode-card-head" }, [
-                el("span", { className: "mh-mode-card-title", text: t("autoSyncModeBiTitle") }),
-                el("span", { className: "mh-radio", text: cfg.mode === "bidirectional" ? "✓" : "" }),
+              el("div", { className: "mh-as-opt-top" }, [
+                el("span", { className: "mh-as-opt-title", text: t("autoSyncModeBiTitle") }),
+                el("span", { className: "mh-as-radio-dot" }),
               ]),
-              el("p", { text: t("autoSyncModeBiDesc") }),
+              el("div", { className: "mh-as-opt-desc", text: t("autoSyncModeBiDesc") }),
             ],
           ),
           el(
             "button",
             {
-              className: `mh-mode-card ${cfg.mode === "primary" ? "is-active" : ""}`,
+              className: `mh-as-opt ${cfg.mode === "primary" ? "is-active" : ""}`,
               onClick: () =>
                 patchConfig({
                   mode: "primary",
@@ -104,11 +199,11 @@ export function renderAutoSyncTab(ctx) {
                 }),
             },
             [
-              el("div", { className: "mh-mode-card-head" }, [
-                el("span", { className: "mh-mode-card-title", text: t("autoSyncModePrimaryTitle") }),
-                el("span", { className: "mh-radio", text: cfg.mode === "primary" ? "✓" : "" }),
+              el("div", { className: "mh-as-opt-top" }, [
+                el("span", { className: "mh-as-opt-title", text: t("autoSyncModePrimaryTitle") }),
+                el("span", { className: "mh-as-radio-dot" }),
               ]),
-              el("p", { text: t("autoSyncModePrimaryDesc") }),
+              el("div", { className: "mh-as-opt-desc", text: t("autoSyncModePrimaryDesc") }),
             ],
           ),
         ]),
@@ -127,197 +222,215 @@ export function renderAutoSyncTab(ctx) {
             ])
           : null,
       ]),
-
-      // Row 2: Update Propagation Scope
-      el("div", { className: "mh-setting-row" }, [
-        el("div", { className: "mh-row-label", text: t("autoSyncScopeLabel") }),
-        el("div", { className: "mh-mode-cards" }, [
+      el("div", { className: "mh-as-field-group" }, [
+        el("div", { className: "mh-as-field-label", text: t("autoSyncScopeLabel") }),
+        el("div", { className: "mh-as-opt-grid" }, [
           el(
             "button",
             {
-              className: `mh-mode-card ${cfg.updateScope === "existing-only" ? "is-active" : ""}`,
+              className: `mh-as-opt ${cfg.updateScope === "existing-only" ? "is-active" : ""}`,
               onClick: () => patchConfig({ updateScope: "existing-only" }),
             },
             [
-              el("div", { className: "mh-mode-card-head" }, [
-                el("span", { className: "mh-mode-card-title" }, [
+              el("div", { className: "mh-as-opt-top" }, [
+                el("span", { className: "mh-as-opt-title" }, [
                   el("span", { text: t("autoSyncScopeExistingTitle") }),
-                  el("span", { className: "mh-tag mh-tag-ok", text: t("autoSyncScopeExistingBadge") }),
+                  el("span", { className: "mh-as-badge-rec", text: t("autoSyncScopeExistingBadge") }),
                 ]),
-                el("span", { className: "mh-radio", text: cfg.updateScope === "existing-only" ? "✓" : "" }),
+                el("span", { className: "mh-as-radio-dot" }),
               ]),
-              el("p", { text: t("autoSyncScopeExistingDesc") }),
+              el("div", { className: "mh-as-opt-desc", text: t("autoSyncScopeExistingDesc") }),
             ],
           ),
           el(
             "button",
             {
-              className: `mh-mode-card ${cfg.updateScope === "all-selected" ? "is-active" : ""}`,
+              className: `mh-as-opt ${cfg.updateScope === "all-selected" ? "is-active" : ""}`,
               onClick: () => patchConfig({ updateScope: "all-selected" }),
             },
             [
-              el("div", { className: "mh-mode-card-head" }, [
-                el("span", { className: "mh-mode-card-title", text: t("autoSyncScopeAllTitle") }),
-                el("span", { className: "mh-radio", text: cfg.updateScope === "all-selected" ? "✓" : "" }),
+              el("div", { className: "mh-as-opt-top" }, [
+                el("span", { className: "mh-as-opt-title", text: t("autoSyncScopeAllTitle") }),
+                el("span", { className: "mh-as-radio-dot" }),
               ]),
-              el("p", { text: t("autoSyncScopeAllDesc") }),
+              el("div", { className: "mh-as-opt-desc", text: t("autoSyncScopeAllDesc") }),
             ],
           ),
-        ]),
-      ]),
-
-      // Row 3: MCP Scope
-      el("div", { className: "mh-setting-row" }, [
-        el("div", { className: "mh-scope-head" }, [
-          el("div", {}, [
-            el("div", { className: "mh-row-label", text: t("autoSyncMcpScopeLabel") }),
-            el("div", { className: "mh-row-sub", text: t("autoSyncMcpScopeDesc") }),
-          ]),
-          el("div", { className: "mh-pill-seg" }, [
-            el("button", {
-              className: cfg.mcpScope === "all" ? "is-active" : "",
-              text: t("autoSyncMcpAll", { count: uniqueMcpNames.length }),
-              onClick: () => patchConfig({ mcpScope: "all" }),
-            }),
-            el("button", {
-              className: cfg.mcpScope === "selected" ? "is-active" : "",
-              text: t("autoSyncMcpSelected", { count: selectedMcpSet.size }),
-              onClick: () =>
-                patchConfig({
-                  mcpScope: "selected",
-                  selectedMcpNames:
-                    selectedMcpSet.size > 0 ? [...selectedMcpSet] : uniqueMcpNames.slice(0, uniqueMcpNames.length),
-                }),
-            }),
-          ]),
-        ]),
-        cfg.mcpScope === "selected"
-          ? uniqueMcpNames.length === 0
-            ? el("div", { className: "mh-row-sub", style: "margin-top:8px", text: t("autoSyncMcpEmpty") })
-            : el(
-                "div",
-                { className: "mh-mcp-chips" },
-                uniqueMcpNames.map((name) => {
-                  const active = selectedMcpSet.has(name);
-                  return el("button", {
-                    className: `mh-mcp-chip ${active ? "is-on" : ""}`,
-                    text: `${active ? "✓ " : ""}${name}`,
-                    onClick: () => {
-                      const next = active
-                        ? [...selectedMcpSet].filter((x) => x !== name)
-                        : [...selectedMcpSet, name];
-                      void patchConfig({ selectedMcpNames: next });
-                    },
-                  });
-                }),
-              )
-          : null,
-      ]),
-
-      // Row 4: Target AIs
-      el("div", { className: "mh-setting-row" }, [
-        el("div", { className: "mh-ai-panel-head", style: "margin-bottom:8px" }, [
-          el("div", {
-            className: "mh-row-label",
-            text: t("autoSyncTargetsLabel", { selected: selectedTargetSet.size, total: managed.length }),
-          }),
-          el("div", { className: "mh-actions" }, [
-            el("button", {
-              className: "mh-btn-link",
-              text: t("btnSelectAll"),
-              onClick: () => patchConfig({ targetIds: managed.map((x) => x.id) }),
-            }),
-            el("button", {
-              className: "mh-btn-link",
-              text: t("btnSelectNone"),
-              onClick: () => patchConfig({ targetIds: [] }),
-            }),
-          ]),
-        ]),
-        el(
-          "div",
-          { className: "mh-ai-grid" },
-          managed.map((tg) => {
-            const on = selectedTargetSet.has(tg.id);
-            return el(
-              "button",
-              {
-                className: `mh-ai-tile ${on ? "is-synced" : ""}`,
-                onClick: () => {
-                  const next = on
-                    ? [...selectedTargetSet].filter((id) => id !== tg.id)
-                    : [...selectedTargetSet, tg.id];
-                  void patchConfig({ targetIds: next });
-                },
-              },
-              [
-                el("span", { text: tg.shortName || tg.name }),
-                el("span", { className: "mh-tile-mark", text: on ? "✓" : "" }),
-              ],
-            );
-          }),
-        ),
-      ]),
-
-      // Row 5: Trigger Rules & Safety Guard
-      el("div", { className: "mh-setting-row" }, [
-        el("div", { className: "mh-row-label", text: t("autoSyncRulesLabel") }),
-        el("div", { className: "mh-rule-list" }, [
-          el("label", { className: "mh-rule-item" }, [
-            el("input", {
-              type: "checkbox",
-              checked: cfg.syncAdditions,
-              onChange: (e) => patchConfig({ syncAdditions: e.target.checked }),
-            }),
-            el("span", {}, [
-              el("strong", { text: t("autoSyncRuleAddTitle") }),
-              el("span", { className: "mh-rule-sub", text: t("autoSyncRuleAddDesc") }),
-            ]),
-          ]),
-          el("label", { className: "mh-rule-item" }, [
-            el("input", {
-              type: "checkbox",
-              checked: cfg.syncUpdates,
-              onChange: (e) => patchConfig({ syncUpdates: e.target.checked }),
-            }),
-            el("span", {}, [
-              el("strong", { text: t("autoSyncRuleUpdateTitle") }),
-              el("span", { className: "mh-rule-sub", text: t("autoSyncRuleUpdateDesc") }),
-            ]),
-          ]),
-          el("label", { className: "mh-rule-item" }, [
-            el("input", {
-              type: "checkbox",
-              checked: cfg.syncRemovals,
-              onChange: (e) => patchConfig({ syncRemovals: e.target.checked }),
-            }),
-            el("span", {}, [
-              el("strong", { text: t("autoSyncRuleRemoveTitle") }),
-              el("span", {
-                className: "mh-tag mh-tag-alias",
-                style: "margin-left:6px",
-                text: t("autoSyncRuleRemoveWarn"),
-              }),
-              el("span", { className: "mh-rule-sub", text: t("autoSyncRuleRemoveDesc") }),
-            ]),
-          ]),
-        ]),
-        el("div", { className: "mh-guard-strip" }, [
-          el("span", { text: "🛡" }),
-          el("span", { text: t("autoSyncGuardStrip") }),
         ]),
       ]),
     ]),
   ]);
 
-  const logsPanel = el("div", { className: "mh-panel" }, [
-    el("div", { className: "mh-panel-head" }, [
-      el("div", {}, [
-        el("h3", { text: t("autoSyncLogsTitle") }),
-        el("p", { text: t("autoSyncLogsDesc") }),
+  // 2B. Trigger Actions Card (Right of Bento)
+  function renderActionRow({ title, desc, warnBadge, checked, onToggle }) {
+    return el(
+      "div",
+      {
+        className: "mh-as-action-row",
+        onClick: onToggle,
+      },
+      [
+        el("div", { className: "mh-as-action-info" }, [
+          el("div", { className: "mh-as-action-title" }, [
+            el("span", { text: title }),
+            warnBadge ? el("span", { className: "mh-as-badge-warn", text: warnBadge }) : null,
+          ]),
+          el("div", { className: "mh-as-action-desc", text: desc }),
+        ]),
+        el(
+          "button",
+          {
+            className: `mh-toggle-btn mh-toggle-sm ${checked ? "is-on" : ""}`,
+            role: "switch",
+            "aria-checked": String(Boolean(checked)),
+            "aria-label": title,
+            onClick: (e) => {
+              e.stopPropagation();
+              onToggle();
+            },
+          },
+          [el("span", { className: "mh-toggle-thumb" })],
+        ),
+      ],
+    );
+  }
+
+  const actionsCard = el("div", { className: "mh-as-card mh-as-card-stretch" }, [
+    el("div", { className: "mh-as-card-head" }, [
+      el("span", { className: "mh-as-card-title", text: t("autoSyncRulesLabel") }),
+      el("span", { className: "mh-as-card-sub", text: t("autoSyncRulesSub") }),
+    ]),
+    el("div", { className: "mh-as-action-rows" }, [
+      renderActionRow({
+        title: t("autoSyncRuleAddTitle"),
+        desc: t("autoSyncRuleAddDesc"),
+        checked: cfg.syncAdditions,
+        onToggle: () => patchConfig({ syncAdditions: !cfg.syncAdditions }),
+      }),
+      renderActionRow({
+        title: t("autoSyncRuleUpdateTitle"),
+        desc: t("autoSyncRuleUpdateDesc"),
+        checked: cfg.syncUpdates,
+        onToggle: () => patchConfig({ syncUpdates: !cfg.syncUpdates }),
+      }),
+      renderActionRow({
+        title: t("autoSyncRuleRemoveTitle"),
+        desc: t("autoSyncRuleRemoveDesc"),
+        warnBadge: t("autoSyncRuleRemoveWarn"),
+        checked: cfg.syncRemovals,
+        onToggle: () => patchConfig({ syncRemovals: !cfg.syncRemovals }),
+      }),
+    ]),
+  ]);
+
+  const bentoGrid = el("div", { className: `mh-as-bento ${cfg.enabled ? "" : "is-paused"}` }, [
+    strategyCard,
+    actionsCard,
+  ]);
+
+  // 3. Scope Card (AI Pill Chips + MCP Scope Filter)
+  const scopeCard = el("div", { className: `mh-as-card ${cfg.enabled ? "" : "is-paused"}` }, [
+    el("div", { className: "mh-as-scope-section" }, [
+      el("div", { className: "mh-as-scope-head" }, [
+        el("div", { className: "mh-as-card-title" }, [
+          el("span", { text: t("autoSyncTargetsTitle") }),
+          el("span", { className: "mh-as-count-pill", text: `${selectedTargetSet.size} / ${managed.length}` }),
+        ]),
+        el("div", { className: "mh-actions" }, [
+          el("button", {
+            className: "mh-btn-link",
+            text: t("btnSelectAll"),
+            onClick: () => patchConfig({ targetIds: managed.map((x) => x.id) }),
+          }),
+          el("button", {
+            className: "mh-btn-link",
+            text: t("btnSelectNone"),
+            onClick: () => patchConfig({ targetIds: [] }),
+          }),
+        ]),
+      ]),
+      el(
+        "div",
+        { className: "mh-as-ai-pills" },
+        managed.map((tg) => {
+          const on = selectedTargetSet.has(tg.id);
+          return el(
+            "button",
+            {
+              className: `mh-as-ai-pill ${on ? "is-on" : ""}`,
+              "aria-pressed": String(on),
+              onClick: () => {
+                const next = on
+                  ? [...selectedTargetSet].filter((id) => id !== tg.id)
+                  : [...selectedTargetSet, tg.id];
+                void patchConfig({ targetIds: next });
+              },
+            },
+            [
+              el("span", { className: "mh-as-ai-dot" }),
+              el("span", { text: tg.shortName || tg.name }),
+            ],
+          );
+        }),
+      ),
+    ]),
+    el("div", { className: "mh-as-scope-section" }, [
+      el("div", { className: "mh-as-scope-head mh-as-scope-head-tight" }, [
+        el("div", {}, [
+          el("div", { className: "mh-as-card-title", text: t("autoSyncMcpScopeLabel") }),
+          el("div", { className: "mh-row-sub", text: t("autoSyncMcpScopeDesc") }),
+        ]),
+        el("div", { className: "mh-pill-seg" }, [
+          el("button", {
+            className: cfg.mcpScope === "all" ? "is-active" : "",
+            text: t("autoSyncMcpAll", { count: uniqueMcpNames.length }),
+            onClick: () => patchConfig({ mcpScope: "all" }),
+          }),
+          el("button", {
+            className: cfg.mcpScope === "selected" ? "is-active" : "",
+            text: t("autoSyncMcpSelected", { count: selectedMcpSet.size }),
+            onClick: () =>
+              patchConfig({
+                mcpScope: "selected",
+                selectedMcpNames:
+                  selectedMcpSet.size > 0 ? [...selectedMcpSet] : uniqueMcpNames.slice(0, uniqueMcpNames.length),
+              }),
+          }),
+        ]),
+      ]),
+      cfg.mcpScope === "selected"
+        ? uniqueMcpNames.length === 0
+          ? el("div", { className: "mh-row-sub", style: "margin-top:8px", text: t("autoSyncMcpEmpty") })
+          : el(
+              "div",
+              { className: "mh-mcp-chips" },
+              uniqueMcpNames.map((name) => {
+                const active = selectedMcpSet.has(name);
+                return el("button", {
+                  className: `mh-mcp-chip ${active ? "is-on" : ""}`,
+                  text: `${active ? "✓ " : ""}${name}`,
+                  onClick: () => {
+                    const next = active
+                      ? [...selectedMcpSet].filter((x) => x !== name)
+                      : [...selectedMcpSet, name];
+                    void patchConfig({ selectedMcpNames: next });
+                  },
+                });
+              }),
+            )
+        : null,
+    ]),
+  ]);
+
+  // 4. Recent Activity Logs Card
+  const logsCard = el("div", { className: "mh-as-card" }, [
+    el("div", { className: "mh-as-card-head" }, [
+      el("div", { className: "mh-as-card-title" }, [
+        el("span", { text: t("autoSyncLogsTitle") }),
+        el("span", { className: "mh-as-count-pill", text: String(logs.length) }),
       ]),
       el("div", { className: "mh-actions" }, [
-        el("span", { className: "mh-tag mh-tag-mono", text: String(logs.length) }),
+        el("span", { className: "mh-as-card-sub", text: t("autoSyncLogsDesc") }),
         logs.length > 0
           ? el("button", {
               className: "mh-btn-link",
@@ -336,10 +449,10 @@ export function renderAutoSyncTab(ctx) {
       ]),
     ]),
     logs.length === 0
-      ? el("div", { className: "mh-backup-empty", text: t("autoSyncLogsEmpty") })
+      ? el("div", { className: "mh-as-log-empty", text: t("autoSyncLogsEmpty") })
       : el(
           "div",
-          {},
+          { className: "mh-as-log-list" },
           logs.map((entry) => {
             const actionLabel =
               entry.action === "add"
@@ -404,5 +517,5 @@ export function renderAutoSyncTab(ctx) {
         ),
   ]);
 
-  return el("div", {}, [configPanel, logsPanel]);
+  return el("div", { className: "mh-as-stack" }, [heroCard, bentoGrid, scopeCard, logsCard]);
 }
