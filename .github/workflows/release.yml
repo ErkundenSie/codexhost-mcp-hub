@@ -1,4 +1,4 @@
-name: Release MCP Hub
+name: Release MCP Sync Hub
 
 on:
   push:
@@ -31,20 +31,22 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          ID=$(node -p "require('./manifest.json').id")
           VERSION=$(node -p "require('./manifest.json').version")
           TAG="${GITHUB_REF_NAME}"
           if [[ "${GITHUB_REF_TYPE}" != "tag" ]]; then
             TAG="v${VERSION}"
           fi
-          ZIP="dist/mcp-hub-${VERSION}.zip"
+          ZIP="dist/${ID}-${VERSION}.zip"
           if [ ! -f "$ZIP" ]; then
             echo "Expected package not found: $ZIP" >&2
             exit 1
           fi
+          ASSETS=("$ZIP" "assets/icon.png" "assets/preview.png")
           if gh release view "$TAG" >/dev/null 2>&1; then
-            gh release upload "$TAG" "$ZIP" --clobber
+            gh release upload "$TAG" "${ASSETS[@]}" --clobber
           else
-            gh release create "$TAG" "$ZIP" \
-              --title "${TAG} — MCP Hub" \
+            gh release create "$TAG" "${ASSETS[@]}" \
+              --title "${TAG} — MCP Sync Hub" \
               --generate-notes
           fi

@@ -86,10 +86,10 @@ node --test test/hub.test.mjs
 
 ### 方式二：下载 Release `.zip` 本地导入
 
-1. 前往 [Releases](https://github.com/ErkundenSie/codexhost-mcp-hub/releases/latest) 下载最新的 `mcp-hub-*.zip`；
+1. 前往 [Releases](https://github.com/ErkundenSie/codexhost-mcp-hub/releases/latest) 下载最新的 `mcp-sync-hub-*.zip`；
 2. 在 CodexHost「插件中心」点击 **导入插件 → 本地 .zip** 上传安装并启用。
 
-> 若已安装旧版 `mcp-hub`，直接通过「导入插件」重新导入时请先卸载旧版，或在已安装插件详情页进行更新。
+> 若已安装旧版插件，直接通过「导入插件」重新导入时请先卸载旧版，或在已安装插件详情页进行更新。
 
 ## 发布新版本
 

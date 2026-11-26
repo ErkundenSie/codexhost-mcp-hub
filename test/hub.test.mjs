@@ -735,7 +735,7 @@ test("end-to-end HubController: scan, import, sync across Codex/Claude/AGY/OpenC
     // 8. Backend activate(ctx) contract check
     const registered = new Map();
     const dispose = await activate({
-      extensionId: "mcp-hub",
+      extensionId: "mcp-sync-hub",
       extensionDir: rootDir,
       dataDir,
       readSettings: async () => settings,
