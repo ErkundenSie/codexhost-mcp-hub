@@ -253,24 +253,33 @@ export function renderServersTab(ctx) {
 
     let probeEl = null;
     if (probe) {
+      const hasTools = typeof probe.toolCount === "number";
       let text;
       if (probe.kind === "stdio") {
         text = probe.ok
-          ? probe.warn
-            ? t("probeStdioWarn", { detail: probe.detail })
-            : t("probeStdioOk", { detail: probe.detail })
+          ? hasTools
+            ? t("probeStdioOkTools", { count: probe.toolCount })
+            : probe.warn
+              ? t("probeStdioWarn", { detail: probe.detail })
+              : t("probeStdioOk", { detail: probe.detail })
           : t("probeFail", { error: probe.error });
       } else if (probe.ok && probe.needsAuth) {
         text = t("probeAuth", { status: probe.status });
       } else if (probe.ok) {
-        text = t("probeOk", { status: probe.status });
+        text = hasTools
+          ? t("probeOkTools", { status: probe.status, count: probe.toolCount })
+          : t("probeOk", { status: probe.status });
       } else {
         text = t("probeFail", { error: probe.error });
       }
-      probeEl = el("div", {
-        className: `mh-probe-bar ${probe.ok ? "is-ok" : "is-err"}`,
-        text,
-      });
+      const toolPreview =
+        hasTools && Array.isArray(probe.toolNames) && probe.toolNames.length > 0
+          ? `${probe.toolNames.join(", ")}${probe.toolCount > probe.toolNames.length ? " …" : ""}`
+          : "";
+      probeEl = el("div", { className: `mh-probe-bar ${probe.ok ? "is-ok" : "is-err"}` }, [
+        el("div", { text }),
+        toolPreview ? el("div", { className: "mh-probe-tools", text: toolPreview }) : null,
+      ]);
     }
 
     const statParts = [t("cardStatSynced", { count: changes.synced.length })];

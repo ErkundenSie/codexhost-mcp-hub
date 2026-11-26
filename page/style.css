@@ -1094,6 +1094,14 @@
   color: var(--cx-page-danger, #cf222e);
 }
 
+.mh-probe-tools {
+  margin-top: 3px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 11px;
+  color: var(--cx-page-text-muted, #64748b);
+  word-break: break-word;
+}
+
 .mh-empty {
   text-align: center;
   padding: 36px 20px;

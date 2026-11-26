@@ -9,6 +9,7 @@ import { crc32, inflateRawSync } from "node:zlib";
 
 import { atomicWriteText } from "../backend/adapters.mjs";
 import { activate, createHubController } from "../backend/index.mjs";
+import { probeMcpServer } from "../backend/probe.mjs";
 import { parseCodexMcpServers, updateCodexToml } from "../backend/toml.mjs";
 import { McpFileWatcher } from "../backend/watcher.mjs";
 import { MESSAGES } from "../shared/i18n.mjs";
@@ -1443,6 +1444,112 @@ test("v2.5.0: copilot-json format (type:local + tools preservation), persistent 
     assert.ok(probeMissingArg.error.includes("Referenced file not found"));
   } finally {
     hub1.dispose();
+    await rm(tmpRoot, { recursive: true, force: true });
+  }
+});
+
+test("v2.5.1: probeMcpServer reports toolCount & toolNames for Streamable HTTP (JSON + SSE + session) and stdio MCP handshakes", async () => {
+  const tmpRoot = await mkdtemp(path.join(os.tmpdir(), "mcp-hub-v251-"));
+  const mockStdioScript = path.join(tmpRoot, "mock-mcp-stdio.mjs");
+  await writeFile(
+    mockStdioScript,
+    [
+      'process.stdin.setEncoding("utf8");',
+      'let buf = "";',
+      'process.stdin.on("data", (chunk) => {',
+      '  buf += chunk;',
+      '  let idx;',
+      '  while ((idx = buf.indexOf("\\n")) !== -1) {',
+      '    const line = buf.slice(0, idx).trim();',
+      '    buf = buf.slice(idx + 1);',
+      '    if (!line) continue;',
+      '    const msg = JSON.parse(line);',
+      '    if (msg.method === "initialize") {',
+      '      process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id: msg.id, result: { protocolVersion: "2024-11-05", capabilities: { tools: {} }, serverInfo: { name: "mock" } } }) + "\\n");',
+      '    } else if (msg.method === "tools/list") {',
+      '      process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id: msg.id, result: { tools: [{ name: "alpha_tool" }, { name: "beta_tool" }, { name: "gamma_tool" }] } }) + "\\n");',
+      '    }',
+      '  }',
+      '});',
+    ].join("\n"),
+    "utf8",
+  );
+
+  // Ephemeral Streamable HTTP server supporting both JSON and SSE responses with mcp-session-id
+  const httpServer = http.createServer((req, res) => {
+    let raw = "";
+    req.on("data", (c) => {
+      raw += c;
+    });
+    req.on("end", () => {
+      const msg = raw ? JSON.parse(raw) : {};
+      if (req.url === "/mcp-json") {
+        if (msg.method === "initialize") {
+          res.writeHead(200, { "Content-Type": "application/json", "mcp-session-id": "sess-123" });
+          res.end(JSON.stringify({ jsonrpc: "2.0", id: msg.id, result: { protocolVersion: "2024-11-05" } }));
+        } else if (msg.method === "notifications/initialized") {
+          res.writeHead(202);
+          res.end();
+        } else if (msg.method === "tools/list") {
+          assert.equal(req.headers["mcp-session-id"], "sess-123");
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(
+            JSON.stringify({
+              jsonrpc: "2.0",
+              id: msg.id,
+              result: { tools: [{ name: "http_search" }, { name: "http_fetch" }] },
+            }),
+          );
+        }
+      } else if (req.url === "/mcp-sse") {
+        if (msg.method === "initialize") {
+          res.writeHead(200, { "Content-Type": "text/event-stream" });
+          res.end(`event: message\ndata: ${JSON.stringify({ jsonrpc: "2.0", id: msg.id, result: {} })}\n\n`);
+        } else if (msg.method === "notifications/initialized") {
+          res.writeHead(202);
+          res.end();
+        } else if (msg.method === "tools/list") {
+          res.writeHead(200, { "Content-Type": "text/event-stream" });
+          res.end(
+            `event: message\ndata: ${JSON.stringify({ jsonrpc: "2.0", id: msg.id, result: { tools: [{ name: "sse_tool_1" }] } })}\n\n`,
+          );
+        }
+      }
+    });
+  });
+
+  await new Promise((resolve) => httpServer.listen(0, "127.0.0.1", resolve));
+  const port = httpServer.address().port;
+
+  try {
+    // 1. stdio real MCP handshake returns exact toolCount & toolNames
+    const stdioRes = await probeMcpServer(
+      { transport: { type: "stdio", command: process.execPath, args: [mockStdioScript] } },
+      4000,
+    );
+    assert.equal(stdioRes.ok, true);
+    assert.equal(stdioRes.toolCount, 3);
+    assert.deepEqual(stdioRes.toolNames, ["alpha_tool", "beta_tool", "gamma_tool"]);
+
+    // 2. Streamable HTTP JSON response with session header
+    const httpJsonRes = await probeMcpServer(
+      { transport: { type: "http", url: `http://127.0.0.1:${port}/mcp-json` } },
+      4000,
+    );
+    assert.equal(httpJsonRes.ok, true);
+    assert.equal(httpJsonRes.toolCount, 2);
+    assert.deepEqual(httpJsonRes.toolNames, ["http_search", "http_fetch"]);
+
+    // 3. Streamable HTTP SSE-formatted response
+    const httpSseRes = await probeMcpServer(
+      { transport: { type: "http", url: `http://127.0.0.1:${port}/mcp-sse` } },
+      4000,
+    );
+    assert.equal(httpSseRes.ok, true);
+    assert.equal(httpSseRes.toolCount, 1);
+    assert.deepEqual(httpSseRes.toolNames, ["sse_tool_1"]);
+  } finally {
+    httpServer.close();
     await rm(tmpRoot, { recursive: true, force: true });
   }
 });
