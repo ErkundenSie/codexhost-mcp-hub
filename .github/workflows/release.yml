@@ -45,15 +45,18 @@ jobs:
 
           const tag = process.env.RELEASE_TAG;
           const repo = process.env.RELEASE_REPO || "";
-          const escapedTag = tag.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
           let body = "";
 
           if (existsSync("CHANGELOG.md")) {
             const changelog = readFileSync("CHANGELOG.md", "utf8").replace(/\r\n/g, "\n");
-            const re = new RegExp(`^##\\s+\\[?${escapedTag}\\]?[^\\n]*\\n([\\s\\S]*?)(?=^##\\s+|$)`, "m");
-            const m = changelog.match(re);
-            if (m && m[1].trim()) {
-              body = m[1].trim().replace(/\n+---\s*$/, "").trim();
+            for (const sec of changelog.split(/^##\s+/m).slice(1)) {
+              const nl = sec.indexOf("\n");
+              if (nl === -1) continue;
+              const heading = sec.slice(0, nl).trim();
+              if (heading.startsWith(`[${tag}]`) || heading.startsWith(`${tag} `) || heading === tag) {
+                body = sec.slice(nl + 1).trim().replace(/\n+---\s*$/, "").trim();
+                break;
+              }
             }
           }
 
