@@ -9,6 +9,7 @@ import { fileURLToPath } from "node:url";
 import { crc32, inflateRawSync } from "node:zlib";
 
 import { atomicWriteText } from "../backend/adapters.mjs";
+import { parseDshCordisMcpServers, updateDshCordisYaml } from "../backend/dsh-yaml.mjs";
 import { activate, createHubController } from "../backend/index.mjs";
 import { probeMcpServer } from "../backend/probe.mjs";
 import { parseCodexMcpServers, updateCodexToml } from "../backend/toml.mjs";
@@ -18,6 +19,18 @@ import { detectBuiltinMcp, isCodexhostLoopbackServer, parseMcpJsonInput } from "
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const rootDir = path.resolve(__dirname, "..");
+
+// WHATWG Fetch / undici rejects restricted ports (e.g. 6000) with ERR_UNSAFE_PORT.
+const FETCH_UNSAFE_PORTS = new Set([6000, 6665, 6666, 6667, 6668, 6669, 6697, 10080]);
+async function listenSafePort(server) {
+  for (let i = 0; i < 8; i++) {
+    await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const port = server.address().port;
+    if (!FETCH_UNSAFE_PORTS.has(port)) return port;
+    await new Promise((resolve) => server.close(resolve));
+  }
+  throw new Error("Could not allocate a Fetch-safe ephemeral port");
+}
 
 test("manifest.json conforms to codexhost manifestVersion 2 contract and assets are valid PNGs", async () => {
   const manifest = JSON.parse(await readFile(path.join(rootDir, "manifest.json"), "utf8"));
@@ -56,6 +69,8 @@ test("manifest.json conforms to codexhost manifestVersion 2 contract and assets 
     "shared/i18n.mjs",
     manifest.backend.entry,
     "backend/adapters.mjs",
+    "backend/dsh-yaml.mjs",
+    "backend/oauth.mjs",
     "backend/probe.mjs",
     "backend/store.mjs",
     "backend/toml.mjs",
@@ -754,7 +769,7 @@ test("end-to-end HubController: scan, import, sync across Codex/Claude/AGY/OpenC
         res.end(JSON.stringify({ jsonrpc: "2.0", id: 1, result: {} }));
       }
     });
-    await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+    await listenSafePort(server);
     const port = server.address().port;
     try {
       const okProbe = await hub.probeServer({
@@ -1510,7 +1525,7 @@ test("v2.5.2: probeMcpServer reports toolCount & toolNames for Streamable HTTP (
     });
   });
 
-  await new Promise((resolve) => httpServer.listen(0, "127.0.0.1", resolve));
+  await listenSafePort(httpServer);
   const port = httpServer.address().port;
 
   try {
@@ -1742,7 +1757,7 @@ test("v2.5.4: built-in MCP OAuth 2.1 PKCE login, tool probe with Bearer token, r
     });
   });
 
-  await new Promise((resolve) => mockServer.listen(0, "127.0.0.1", resolve));
+  await listenSafePort(mockServer);
   const mockPort = mockServer.address().port;
   authBaseUrl = `http://127.0.0.1:${mockPort}`;
 
@@ -1916,7 +1931,7 @@ test("v2.5.4: OAuth background auto-refresh rotates due tokens, updates synced A
     });
   });
 
-  await new Promise((resolve) => mockServer.listen(0, "127.0.0.1", resolve));
+  await listenSafePort(mockServer);
   authBaseUrl = `http://127.0.0.1:${mockServer.address().port}`;
 
   const tmpRoot = await mkdtemp(path.join(os.tmpdir(), "mcp-hub-oauth-autorefresh-"));
@@ -2080,7 +2095,7 @@ test("v2.5.4: multi-account per-card OAuth isolation (AI A = Account A, AI B/C =
     });
   });
 
-  await new Promise((resolve) => mockServer.listen(0, "127.0.0.1", resolve));
+  await listenSafePort(mockServer);
   authBaseUrl = `http://127.0.0.1:${mockServer.address().port}`;
   const sharedUrl = `${authBaseUrl}/mcp`;
 
@@ -2268,7 +2283,7 @@ test("v2.5.4: persistent one-time auth-hint discovery detects 401 vs 200 once an
     });
   });
 
-  await new Promise((resolve) => mockServer.listen(0, "127.0.0.1", resolve));
+  await listenSafePort(mockServer);
   const baseUrl = `http://127.0.0.1:${mockServer.address().port}`;
   const tmpRoot = await mkdtemp(path.join(os.tmpdir(), "mcp-hub-auth-hints-"));
   const fakeHome = path.join(tmpRoot, "home");
@@ -2469,7 +2484,7 @@ test("v2.5.4: OAuth hardening — SSE GET discovery, invalid state rejection, du
     });
   });
 
-  await new Promise((resolve) => mockServer.listen(0, "127.0.0.1", resolve));
+  await listenSafePort(mockServer);
   baseUrl = `http://127.0.0.1:${mockServer.address().port}`;
 
   const tmpRoot = await mkdtemp(path.join(os.tmpdir(), "mcp-hub-oauth-hard-"));
@@ -2559,6 +2574,329 @@ test("v2.5.4: OAuth hardening — SSE GET discovery, invalid state rejection, du
   } finally {
     hub.dispose();
     mockServer.close();
+    await rm(tmpRoot, { recursive: true, force: true });
+  }
+});
+
+test("v2.5.5: DeepSeek Cordis YAML parser & surgical updater preserves unrelated blocks, comments, !!js, extra fields, and avoids collisions", () => {
+  const original = [
+    "# DeepSeek dsh desktop profile patch",
+    "- id: ui-chat",
+    "  disabled: !!js \"ctx.get('profileContext')?.name !== 'desktop'\"",
+    "  config:",
+    "    theme: dark",
+    "",
+    "# Standalone insert MCP entries",
+    "- insert:",
+    "    - id: mcp-ssh",
+    '      name: "@deepseek-ai/dsh-mcp-client"',
+    "      config:",
+    "        serverName: ssh",
+    "        transport: stdio",
+    "        command: 'D:\\NVM\\.nodejs\\node.exe'",
+    "        args:",
+    "          - 'C:\\Users\\Demo\\.ssh-mcp\\launch.mjs'",
+    '          - "--config-file"',
+    "          - 'C:\\Users\\Demo\\.ssh-mcp\\ssh.json'",
+    "        toolCallTimeoutMs: 60000",
+    "- insert:",
+    "    - id: magpie-mcp-magpie-artifacts",
+    '      name: "@deepseek-ai/dsh-mcp-client"',
+    "      config:",
+    "        serverName: magpie-artifacts",
+    "        transport: stdio",
+    '        command: "magpie"',
+    '        args: ["mcp", "artifacts"]',
+    "",
+    "# Unrelated model provider block",
+    "- id: llm-pi-ai",
+    "  config:",
+    "    providers:",
+    "      - id: deepseek",
+    '        baseUrl: "https://api.deepseek.com"',
+    "",
+  ].join("\n");
+
+  // 1. Parse both standalone insert MCP entries cleanly (including Windows single-quoted paths & flow args)
+  const parsed = parseDshCordisMcpServers(original);
+  assert.deepEqual(Object.keys(parsed).sort(), ["magpie-artifacts", "ssh"]);
+  assert.equal(parsed.ssh.transport.type, "stdio");
+  assert.equal(parsed.ssh.transport.command, "D:\\NVM\\.nodejs\\node.exe");
+  assert.deepEqual(parsed.ssh.transport.args, [
+    "C:\\Users\\Demo\\.ssh-mcp\\launch.mjs",
+    "--config-file",
+    "C:\\Users\\Demo\\.ssh-mcp\\ssh.json",
+  ]);
+  assert.deepEqual(parsed["magpie-artifacts"].transport.args, ["mcp", "artifacts"]);
+
+  // 2. Surgically update standalone `ssh` in-place AND add new `context7` (HTTP) + `fs` (stdio) via mcp-manager
+  const updated = updateDshCordisYaml(
+    original,
+    {
+      ssh: {
+        name: "ssh",
+        enabled: true,
+        transport: {
+          type: "stdio",
+          command: "D:\\NVM\\.nodejs\\node.exe",
+          args: ["C:\\Users\\Demo\\.ssh-mcp\\launch.mjs", "--verbose"],
+          env: { SSH_DEBUG: "1" },
+        },
+      },
+      context7: {
+        name: "context7",
+        enabled: true,
+        transport: {
+          type: "http",
+          url: "https://mcp.context7.com/mcp",
+          headers: { Authorization: "Bearer tok-xyz" },
+        },
+      },
+      fs: {
+        name: "fs",
+        enabled: false,
+        transport: {
+          type: "stdio",
+          command: "npx",
+          args: ["-y", "@modelcontextprotocol/server-filesystem", "D:\\Work"],
+        },
+      },
+    },
+    [],
+  );
+
+  // Unrelated blocks, comments, and !!js expression must remain verbatim
+  assert.ok(updated.includes("# DeepSeek dsh desktop profile patch"));
+  assert.ok(updated.includes("disabled: !!js \"ctx.get('profileContext')?.name !== 'desktop'\""));
+  assert.ok(updated.includes("# Unrelated model provider block"));
+  assert.ok(updated.includes('baseUrl: "https://api.deepseek.com"'));
+  // Standalone `ssh` updated in-place preserving id & toolCallTimeoutMs, NOT duplicated in mcp-manager
+  assert.ok(updated.includes("id: mcp-ssh"));
+  assert.ok(updated.includes("toolCallTimeoutMs: 60000"));
+  assert.equal(
+    /^\s+ssh:\s*$/m.test(updated),
+    false,
+    "Standalone ssh must not be duplicated into mcp-manager",
+  );
+  // New MCPs live under `- id: mcp-manager` with official `name` & `streamable-http` transport
+  assert.ok(updated.includes("- id: mcp-manager"));
+  assert.ok(updated.includes('name: "@deepseek-ai/dsh-mcp-manager"'));
+  assert.ok(updated.includes("transport: streamable-http"));
+
+  const reparsed = parseDshCordisMcpServers(updated);
+  assert.deepEqual(Object.keys(reparsed).sort(), ["context7", "fs", "magpie-artifacts", "ssh"]);
+  assert.deepEqual(reparsed.ssh.transport.args, ["C:\\Users\\Demo\\.ssh-mcp\\launch.mjs", "--verbose"]);
+  assert.deepEqual(reparsed.ssh.transport.env, { SSH_DEBUG: "1" });
+  assert.equal(reparsed.context7.transport.type, "http");
+  assert.equal(reparsed.context7.transport.url, "https://mcp.context7.com/mcp");
+  assert.equal(reparsed.context7.transport.headers.Authorization, "Bearer tok-xyz");
+  assert.equal(reparsed.fs.enabled, false);
+  assert.equal(reparsed.fs.transport.args[2], "D:\\Work");
+
+  // 3. Switch `fs` from stdio -> http and remove standalone `magpie-artifacts` + `context7`
+  const afterSwitchAndRm = updateDshCordisYaml(
+    updated,
+    {
+      fs: {
+        name: "fs",
+        enabled: true,
+        transport: { type: "http", url: "https://fs.example.com/mcp" },
+      },
+    },
+    ["magpie-artifacts", "context7"],
+  );
+  // Empty `- insert:` block for magpie-artifacts should be dropped cleanly
+  assert.equal(afterSwitchAndRm.includes("magpie-mcp-magpie-artifacts"), false);
+  assert.equal(afterSwitchAndRm.includes("context7"), false);
+  // Cross-transport fields (command/args) must be stripped when switching fs to streamable-http
+  assert.equal(afterSwitchAndRm.includes("server-filesystem"), false);
+  const finalParsed = parseDshCordisMcpServers(afterSwitchAndRm);
+  assert.deepEqual(Object.keys(finalParsed).sort(), ["fs", "ssh"]);
+  assert.equal(finalParsed.fs.transport.type, "http");
+  assert.equal(finalParsed.fs.transport.url, "https://fs.example.com/mcp");
+  assert.equal(finalParsed.fs.enabled, true);
+
+  // 4. Empty / comments-only / `[]` files are valid; non-sequence root / bad syntax throws
+  assert.deepEqual(parseDshCordisMcpServers(""), {});
+  assert.deepEqual(parseDshCordisMcpServers("# only comment\n[]\n"), {});
+  const fromEmptyFlow = updateDshCordisYaml("[]\n", {
+    ping: { name: "ping", enabled: true, transport: { type: "http", url: "https://ping.example.com/mcp" } },
+  }, []);
+  assert.equal(parseDshCordisMcpServers(fromEmptyFlow).ping.transport.url, "https://ping.example.com/mcp");
+
+  assert.throws(() => parseDshCordisMcpServers("foo: bar\n"), /sequence/i);
+  assert.throws(
+    () => parseDshCordisMcpServers("- id: mcp-manager\n\tconfig:\n    servers: {}\n"),
+    /tab/i,
+  );
+});
+
+test("v2.5.5: DeepSeek Desktop & Web end-to-end discovery, cross-AI sync (YAML <-> TOML <-> JSON), auto-sync, and .yml backup/restore", async () => {
+  const tmpRoot = await mkdtemp(path.join(os.tmpdir(), "mcp-hub-dsh-e2e-"));
+  const fakeHome = path.join(tmpRoot, "home");
+  const dataDir = path.join(tmpRoot, "data");
+  await mkdir(path.join(fakeHome, ".dsh", "profiles", "desktop"), { recursive: true });
+  await mkdir(path.join(fakeHome, ".dsh", "profiles", "web"), { recursive: true });
+  await mkdir(path.join(fakeHome, ".codex"), { recursive: true });
+  await mkdir(path.join(fakeHome, ".pi", "agent"), { recursive: true });
+
+  const dshDesktopFile = path.join(fakeHome, ".dsh", "profiles", "desktop", "cordis.patch.yml");
+  const dshWebFile = path.join(fakeHome, ".dsh", "profiles", "web", "cordis.patch.yml");
+  const codexFile = path.join(fakeHome, ".codex", "config.toml");
+  const piFile = path.join(fakeHome, ".pi", "agent", "mcp.json");
+
+  await writeFile(
+    dshDesktopFile,
+    [
+      "# DeepSeek Desktop config",
+      "- id: ui-chat",
+      "  config:",
+      "    locale: zh-CN",
+      "- insert:",
+      "    - id: mcp-ssh",
+      '      name: "@deepseek-ai/dsh-mcp-client"',
+      "      config:",
+      "        serverName: ssh",
+      "        transport: stdio",
+      '        command: "node"',
+      '        args: ["C:\\\\tools\\\\ssh.mjs"]',
+      "        toolCallTimeoutMs: 60000",
+      "",
+    ].join("\n"),
+    "utf8",
+  );
+  await writeFile(
+    dshWebFile,
+    ["# DeepSeek Web config", "- id: ui-settings-general", "  config:", "    theme: auto", ""].join("\n"),
+    "utf8",
+  );
+  await writeFile(codexFile, '# Codex header\nmodel = "gpt-5"\n', "utf8");
+  await writeFile(piFile, JSON.stringify({ mcpServers: {} }, null, 2) + "\n", "utf8");
+
+  const hub = createHubController({
+    dataDir,
+    readSettings: async () => ({ autoBackup: true, excludeBuiltinMcp: true, enableAutoSync: true }),
+    home: fakeHome,
+    platform: "win32",
+    watchDebounceMs: 5000,
+  });
+
+  try {
+    // 1. Both DeepSeek Desktop & Web are discovered automatically
+    const ov = await hub.buildOverview();
+    const dsDesktop = ov.targets.find((t) => t.id === "deepseek-desktop");
+    const dsWeb = ov.targets.find((t) => t.id === "deepseek-web");
+    assert.ok(dsDesktop && dsDesktop.detected && dsDesktop.exists);
+    assert.ok(dsWeb && dsWeb.detected && dsWeb.exists);
+    assert.equal(dsDesktop.format, "dsh-cordis-yaml");
+    assert.equal(dsWeb.format, "dsh-cordis-yaml");
+    assert.equal(dsDesktop.nativeCount, 1);
+    assert.equal(dsDesktop.nativeServers[0].name, "ssh");
+
+    // 2. Import from all targets -> imports `ssh` from DeepSeek Desktop
+    const imported = await hub.importFromTarget({ sourceTargetId: "all" });
+    const sshSrv = imported.overview.servers.find((s) => s.name === "ssh");
+    assert.ok(sshSrv, "Should import ssh MCP from DeepSeek Desktop");
+    assert.equal(sshSrv.transport.command, "node");
+    assert.deepEqual(sshSrv.transport.args, ["C:\\tools\\ssh.mjs"]);
+
+    // 3. Add a remote HTTP MCP with Authorization header and sync to ALL four AIs (YAML + TOML + JSON)
+    await hub.saveServer({
+      name: "cloud_api",
+      enabled: true,
+      transport: {
+        type: "http",
+        url: "https://api.example.com/mcp",
+        headers: { Authorization: "Bearer secret-123" },
+      },
+      targets: ["deepseek-desktop", "deepseek-web", "codex", "pi"],
+    });
+    await hub.applySync();
+
+    const desktopAfter = await readFile(dshDesktopFile, "utf8");
+    const webAfter = await readFile(dshWebFile, "utf8");
+    const codexAfter = await readFile(codexFile, "utf8");
+    const piAfter = JSON.parse(await readFile(piFile, "utf8"));
+
+    assert.ok(desktopAfter.includes("# DeepSeek Desktop config"));
+    assert.ok(desktopAfter.includes("toolCallTimeoutMs: 60000"));
+    assert.equal(parseDshCordisMcpServers(desktopAfter).cloud_api.transport.url, "https://api.example.com/mcp");
+    assert.equal(
+      parseDshCordisMcpServers(desktopAfter).cloud_api.transport.headers.Authorization,
+      "Bearer secret-123",
+    );
+    assert.equal(parseDshCordisMcpServers(webAfter).cloud_api.transport.url, "https://api.example.com/mcp");
+    assert.equal(parseCodexMcpServers(codexAfter).cloud_api.transport.headers.Authorization, "Bearer secret-123");
+    assert.equal(piAfter.mcpServers.cloud_api.headers.Authorization, "Bearer secret-123");
+
+    // Backups for DeepSeek use `.yml` extension and restore cleanly
+    const { backups } = await hub.listBackups();
+    const dsBackup = backups.find((b) => b.targetId === "deepseek-web");
+    assert.ok(dsBackup, "Backup should be created before modifying DeepSeek Web config");
+    assert.ok(dsBackup.payloadFile.endsWith(".yml"), `Expected .yml backup, got ${dsBackup.payloadFile}`);
+
+    // 4. Real-time Auto-Sync: editing DeepSeek Desktop YAML propagates to DeepSeek Web (YAML), Codex (TOML), and Pi (JSON)
+    await hub.setAutoSyncConfig({
+      enabled: true,
+      mode: "bidirectional",
+      updateScope: "all-selected",
+      mcpScope: "all",
+      targetIds: ["deepseek-desktop", "deepseek-web", "codex", "pi"],
+      syncAdditions: true,
+      syncUpdates: true,
+      syncRemovals: false,
+    });
+
+    const editedDesktop = updateDshCordisYaml(
+      desktopAfter,
+      {
+        cloud_api: {
+          name: "cloud_api",
+          enabled: true,
+          transport: {
+            type: "http",
+            url: "https://api.example.com/mcp/v2",
+            headers: { Authorization: "Bearer rotated-456" },
+          },
+        },
+        dsh_added: {
+          name: "dsh_added",
+          enabled: true,
+          transport: { type: "stdio", command: "uvx", args: ["mcp-server-time"] },
+        },
+      },
+      [],
+    );
+    await writeFile(dshDesktopFile, editedDesktop, "utf8");
+    const syncRes = await hub.handleWatchedTargetChange("deepseek-desktop");
+    assert.ok(syncRes.propagated >= 3, `Expected propagation to Web, Codex, Pi; got ${syncRes.propagated}`);
+
+    // Verify every AI received the update in its own native format
+    const webSynced = parseDshCordisMcpServers(await readFile(dshWebFile, "utf8"));
+    const codexSynced = parseCodexMcpServers(await readFile(codexFile, "utf8"));
+    const piSynced = JSON.parse(await readFile(piFile, "utf8"));
+
+    assert.equal(webSynced.cloud_api.transport.url, "https://api.example.com/mcp/v2");
+    assert.equal(webSynced.dsh_added.transport.command, "uvx");
+    assert.equal(codexSynced.cloud_api.transport.url, "https://api.example.com/mcp/v2");
+    assert.equal(codexSynced.cloud_api.transport.headers.Authorization, "Bearer rotated-456");
+    assert.equal(codexSynced.dsh_added.transport.command, "uvx");
+    assert.equal(piSynced.mcpServers.cloud_api.url, "https://api.example.com/mcp/v2");
+    assert.equal(piSynced.mcpServers.dsh_added.command, "uvx");
+
+    // 5. Auto-Sync syntax circuit breaker: malformed YAML in DeepSeek Desktop must NOT corrupt other AIs
+    await writeFile(dshDesktopFile, "not_a_sequence: broken\n", "utf8");
+    const brokenRes = await hub.handleWatchedTargetChange("deepseek-desktop");
+    assert.equal(brokenRes.propagated, 0);
+    assert.equal(parseCodexMcpServers(await readFile(codexFile, "utf8")).dsh_added.transport.command, "uvx");
+
+    // 6. Restore `.yml` backup for DeepSeek Web
+    await hub.restoreBackup({ backupId: dsBackup.id });
+    const webRestored = await readFile(dshWebFile, "utf8");
+    assert.equal(webRestored.includes("cloud_api"), false);
+    assert.ok(webRestored.includes("# DeepSeek Web config"));
+  } finally {
+    hub.dispose();
     await rm(tmpRoot, { recursive: true, force: true });
   }
 });

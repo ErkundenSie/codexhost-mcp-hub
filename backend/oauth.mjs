@@ -539,13 +539,29 @@ export class OAuthManager {
     this._cleanupSession(server.id, null);
 
     // 1. Bind ephemeral loopback callback server
-    const httpServer = http.createServer();
-    await new Promise((resolve, reject) => {
-      httpServer.once("error", reject);
-      httpServer.listen(0, "127.0.0.1", resolve);
-    });
-    const addr = httpServer.address();
-    const port = typeof addr === "object" && addr ? addr.port : 0;
+    // Bind a loopback callback port while avoiding browser/WHATWG Fetch restricted ports
+    // (e.g. 6000 X11, 6665-6669 IRC, 10080 Amanda) that browsers block with ERR_UNSAFE_PORT.
+    const unsafePorts = new Set([6000, 6665, 6666, 6667, 6668, 6669, 6697, 10080]);
+    let httpServer = null;
+    let port = 0;
+    for (let attempt = 0; attempt < 8; attempt++) {
+      const candidate = http.createServer();
+      await new Promise((resolve, reject) => {
+        candidate.once("error", reject);
+        candidate.listen(0, "127.0.0.1", resolve);
+      });
+      const addr = candidate.address();
+      const candidatePort = typeof addr === "object" && addr ? addr.port : 0;
+      if (!unsafePorts.has(candidatePort)) {
+        httpServer = candidate;
+        port = candidatePort;
+        break;
+      }
+      await new Promise((resolve) => candidate.close(resolve));
+    }
+    if (!httpServer) {
+      throw new Error("Unable to allocate a browser-safe local OAuth callback port");
+    }
     const redirectUri = `http://127.0.0.1:${port}/callback`;
 
     let meta;

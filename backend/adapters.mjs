@@ -9,6 +9,7 @@ import { mkdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { cleanStringMap, normalizeTransport } from "../shared/models.mjs";
+import { parseDshCordisMcpServers, updateDshCordisYaml } from "./dsh-yaml.mjs";
 import { parseCodexMcpServers, updateCodexToml } from "./toml.mjs";
 
 function claudeDesktopDefaultPath(home, platform) {
@@ -23,7 +24,7 @@ function claudeDesktopDefaultPath(home, platform) {
 
 /**
  * Built-in global AI Harness target descriptors.
- * `format`: "standard-json" | "antigravity-json" | "opencode-json" | "codex-toml"
+ * `format`: "standard-json" | "antigravity-json" | "copilot-json" | "opencode-json" | "codex-toml" | "dsh-cordis-yaml"
  * `detectFiles`: strict indicator files proving the AI is genuinely installed locally
  * (never match shared parent folders like `~/.gemini` or empty `logs/` dirs).
  */
@@ -193,6 +194,30 @@ export function getBuiltinTargets(home = os.homedir(), platform = process.platfo
       rootKey: "mcpServers",
       defaultPath: path.join(home, ".qoder-cn", "mcp.json"),
       detectFiles: [path.join(home, ".qoder-cn", "mcp.json"), path.join(home, ".qoder", "mcp.json")],
+    },
+    {
+      id: "deepseek-desktop",
+      name: "DeepSeek Desktop",
+      shortName: "DeepSeek",
+      format: "dsh-cordis-yaml",
+      rootKey: "mcp-manager",
+      defaultPath: path.join(home, ".dsh", "profiles", "desktop", "cordis.patch.yml"),
+      detectFiles: [
+        path.join(home, ".dsh", "profiles", "desktop", "cordis.patch.yml"),
+        path.join(home, ".dsh", "profiles", "desktop", "package.json"),
+      ],
+    },
+    {
+      id: "deepseek-web",
+      name: "DeepSeek Web",
+      shortName: "DS Web",
+      format: "dsh-cordis-yaml",
+      rootKey: "mcp-manager",
+      defaultPath: path.join(home, ".dsh", "profiles", "web", "cordis.patch.yml"),
+      detectFiles: [
+        path.join(home, ".dsh", "profiles", "web", "cordis.patch.yml"),
+        path.join(home, ".dsh", "profiles", "web", "package.json"),
+      ],
     },
   ];
 }
@@ -389,6 +414,26 @@ export async function readTargetConfig(target) {
     };
   }
 
+  if (target.format === "dsh-cordis-yaml") {
+    try {
+      return {
+        exists: true,
+        detected: true,
+        servers: parseDshCordisMcpServers(rawText),
+        rawText,
+        error: null,
+      };
+    } catch (err) {
+      return {
+        exists: true,
+        detected: true,
+        servers: {},
+        rawText,
+        error: err instanceof Error ? err.message : String(err),
+      };
+    }
+  }
+
   // JSON formats
   try {
     const trimmed = rawText.trim();
@@ -450,6 +495,8 @@ export async function applyTargetMutations(target, upserts, removals) {
   let nextText;
   if (target.format === "codex-toml") {
     nextText = updateCodexToml(originalText, upserts, removals);
+  } else if (target.format === "dsh-cordis-yaml") {
+    nextText = updateDshCordisYaml(originalText, upserts, removals);
   } else {
     const trimmed = originalText.trim();
     let doc = {};

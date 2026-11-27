@@ -136,7 +136,11 @@ export class HubStore {
     const suffix = randomBytes(2).toString("hex");
     const safeTarget = String(targetId).replace(/[^a-zA-Z0-9_-]/g, "_");
     const id = `${stamp}_${suffix}_${safeTarget}`;
-    const ext = configPath.endsWith(".toml") ? ".toml" : ".json";
+    const ext = configPath.endsWith(".toml")
+      ? ".toml"
+      : configPath.endsWith(".yml") || configPath.endsWith(".yaml")
+        ? ".yml"
+        : ".json";
     const payloadFile = `${id}${ext}`;
     const metaFile = `${id}.meta.json`;
 

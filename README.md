@@ -18,16 +18,16 @@
 
 ---
 
-**MCP Sync Hub** 让你在一个界面里集中管理本机所有 AI 客户端的 **Model Context Protocol (MCP)** 配置：支持自动扫描 16 家 AI 原生配置、内置 OAuth 2.1 浏览器统一登录与多账户隔离、实时文件监听自动同步、HTTP/SSE 工具列表发现以及安全增量写入与自动备份。
+**MCP Sync Hub** 让你在一个界面里集中管理本机所有 AI 客户端的 **Model Context Protocol (MCP)** 配置：支持自动扫描 18 个内置 AI 配置目标（含 DeepSeek Desktop / Web）、内置 OAuth 2.1 浏览器统一登录与多账户隔离、实时文件监听自动同步、HTTP/SSE 工具列表发现以及安全增量写入与自动备份。
 
-> **原生持久化**：所有变更直接写入各家 AI 自己的原生配置文件（`.toml` / `.json`）。即使关闭或卸载 CodexHost，你的 MCP 配置依然完整生效。
+> **原生持久化**：所有变更直接写入各家 AI 自己的原生配置文件（`.toml` / `.json` / `.yml`）。即使关闭或卸载 CodexHost，你的 MCP 配置依然完整生效。
 
 ![MCP Sync Hub 界面预览](assets/preview.png)
 
 ## ✨ 核心特性
 
-- **🔍 自动扫描 16 家本机 AI**
-  自动识别已安装的 AI 客户端配置文件（兼容 TOML、Standard JSON、Antigravity JSON、Copilot JSON、OpenCode JSON），支持查看原始配置文件、自定义路径与添加自定义 JSON 目标。
+- **🔍 自动扫描 18 个内置 AI 目标**
+  自动识别已安装的 AI 客户端配置文件（兼容 TOML、Cordis YAML、Standard JSON、Antigravity JSON、Copilot JSON、OpenCode JSON），支持查看原始配置文件、自定义路径与添加自定义 JSON 目标。
 - **🔐 内置 MCP OAuth 2.1 授权与多账户隔离**
   - 纯 Node 原生实现 RFC 9728 / RFC 8414 / RFC 7591 动态注册与 PKCE S256 浏览器授权；
   - 首次导入/加载时自动识别需要鉴权（HTTP 401）的远程 MCP 并持久化缓存，后续打开零重复网络请求；
@@ -41,7 +41,7 @@
 - **⚡ 快速配置向导 & 卡片即时应用**
   支持顶部两步式「快速配置」批量下发/移除（带同名不同配置覆盖保护），也支持单卡片内即时勾选、撤销与一键应用。
 - **🛡️ 安全增量写入 + 自动备份回滚**
-  - Codex / Grok TOML 采用段落级局部更新，保留原文件注释与模型设置；Copilot CLI 自动保留已有的 `tools` 白名单；
+  - Codex / Grok TOML 与 DeepSeek Cordis YAML 均采用块级局部更新，保留原文件注释、模型与无关插件块；Copilot CLI 自动保留已有的 `tools` 白名单；
   - 自动排除并保护官方内置 MCP（如 Codex `node_repl`）与指向本机 CodexHost（`127.0.0.1:4398/mcp`）的回环 MCP；
   - 每次写入前自动保存带时间戳的原文件备份（最多保留 40 份），支持随时一键恢复。
 - **📁 项目级 MCP 同步**
@@ -49,12 +49,14 @@
 
 ## 🤖 支持的 AI 客户端
 
-除以下 16 家内置客户端外，还支持在 **AI 配置** 页添加任意自定义 JSON 目标：
+除以下 18 个内置 AI 配置目标（覆盖不同客户端及独立 Profile）外，还支持在 **AI 配置** 页添加任意自定义 JSON 目标：
 
 | AI 客户端 | 配置格式 | 默认配置文件路径 |
 | --- | --- | --- |
 | **Codex** | `codex-toml` (`mcp_servers`) | `~/.codex/config.toml` |
 | **Grok** | `codex-toml` (`mcp_servers`) | `~/.grok/config.toml` |
+| **DeepSeek Desktop** | `dsh-cordis-yaml` (`mcp-manager` / `dsh-mcp-client`) | `~/.dsh/profiles/desktop/cordis.patch.yml` |
+| **DeepSeek Web** | `dsh-cordis-yaml` (`mcp-manager` / `dsh-mcp-client`) | `~/.dsh/profiles/web/cordis.patch.yml` |
 | **Pi** | `standard-json` (`mcpServers`) | `~/.pi/agent/mcp.json` |
 | **Claude Code** | `standard-json` (`mcpServers`) | `~/.claude.json` |
 | **Claude Desktop** | `standard-json` (`mcpServers`) | Windows: `%APPDATA%\Claude\claude_desktop_config.json`<br/>macOS: `~/Library/Application Support/Claude/claude_desktop_config.json`<br/>Linux: `~/.config/Claude/claude_desktop_config.json` |
@@ -111,7 +113,7 @@
 需要 Node.js 20+（无需 `npm install`，零外部依赖）：
 
 ```bash
-# 运行全部自动化测试（21 项用例，含 ZIP CRC、TOML 局部更新、Auto-Sync、OAuth 2.1 PKCE 多账户隔离）
+# 运行全部自动化测试（含 ZIP CRC、TOML/YAML 局部更新、Auto-Sync、OAuth 2.1 PKCE 多账户隔离）
 node --test test/hub.test.mjs
 
 # 打包为 CodexHost 可导入的 .zip（输出至 dist/mcp-sync-hub-<version>.zip）
@@ -142,7 +144,8 @@ codexhost-mcp-hub/
 │   └── style.css                 # 主题适配样式（自动跟随浅色 / 深色模式）
 ├── backend/
 │   ├── index.mjs                 # 单实例 Node 后端入口 (activate) 与全部 RPC
-│   ├── adapters.mjs              # 16 家内置 AI + 自定义目标 + 项目级格式适配器
+│   ├── adapters.mjs              # 18 个内置 AI 目标 + 自定义目标 + 项目级格式适配器
+│   ├── dsh-yaml.mjs              # DeepSeek Cordis YAML 注释与插件块保留型局部更新器
 │   ├── oauth.mjs                 # 纯 Node MCP OAuth 2.1（PKCE + 自动续期 + 多账户隔离）
 │   ├── probe.mjs                 # Streamable HTTP (JSON/SSE) 工具发现与 stdio 路径探测
 │   ├── watcher.mjs               # 父目录级 fs.watch 防抖监听与自写抑制器

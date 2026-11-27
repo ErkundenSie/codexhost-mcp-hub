@@ -1083,7 +1083,9 @@ export function renderModal(ctx) {
       }),
     ];
   } else if (m.type === "view-config") {
-    title = `${m.targetName || m.targetId} · ${m.format === "codex-toml" ? "TOML" : "JSON"}`;
+    const fmtLabel =
+      m.format === "codex-toml" ? "TOML" : m.format === "dsh-cordis-yaml" ? "YAML" : "JSON";
+    title = `${m.targetName || m.targetId} · ${fmtLabel}`;
     body = [
       el("div", { className: "mh-path-readonly", style: "margin-top:0;margin-bottom:10px" }, [
         el("span", { className: "mh-path-readonly-text", title: m.configPath, text: m.configPath }),
