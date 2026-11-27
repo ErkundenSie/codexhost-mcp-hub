@@ -25,7 +25,7 @@ function makeWizardBoltIcon() {
 
 function buildTransportFromForm(m) {
   if (m.transportType === "stdio") {
-    return {
+    const transport = {
       type: "stdio",
       command: m.command.trim(),
       args: m.argsText
@@ -33,15 +33,19 @@ function buildTransportFromForm(m) {
         .map((x) => x.trim())
         .filter(Boolean),
       env: parseKvLines(m.envText, "="),
-      cwd: m.cwd.trim() || undefined,
     };
+    const cwd = m.cwd.trim();
+    if (cwd) transport.cwd = cwd;
+    return transport;
   }
-  return {
+  const transport = {
     type: m.transportType,
     url: m.url.trim(),
     headers: parseKvLines(m.headersText, ":"),
-    bearerTokenEnvVar: m.bearerTokenEnvVar.trim() || undefined,
   };
+  const bearerEnv = m.bearerTokenEnvVar.trim();
+  if (bearerEnv) transport.bearerTokenEnvVar = bearerEnv;
+  return transport;
 }
 
 function renderServerFormFields(ctx, m, targetSetKey) {
@@ -663,6 +667,7 @@ export function renderModal(ctx) {
               showToast(t("toastImported", { added: res.added, updated: res.updated }));
               state.modal = null;
               render();
+              void ctx.maybeProbeUncheckedAuthHints?.(state.overview);
             } catch (err) {
               showToast(err instanceof Error ? err.message : String(err), true);
             }
@@ -689,6 +694,7 @@ export function renderModal(ctx) {
               showToast(t("toastSaved", { name: m.name.trim() }));
               state.modal = null;
               render();
+              void ctx.maybeProbeUncheckedAuthHints?.(state.overview);
             } catch (err) {
               showToast(err instanceof Error ? err.message : String(err), true);
             }
@@ -794,6 +800,7 @@ export function renderModal(ctx) {
               );
               state.modal = null;
               render();
+              void ctx.maybeProbeUncheckedAuthHints?.(state.overview);
             } catch (err) {
               showToast(err instanceof Error ? err.message : String(err), true);
             }
@@ -802,31 +809,257 @@ export function renderModal(ctx) {
       ];
     }
   } else if (m.type === "edit-server") {
-    title = t("modalEditTitle");
-    body = [renderServerFormFields(ctx, m, "targets")];
+    const isAccountClone = Boolean(m.isClone && m.isAccountMode);
+    const isOAuthClone = Boolean(isAccountClone && m.cloneAuthMode === "oauth");
+    title = !m.isClone
+      ? t("modalEditTitle")
+      : isAccountClone
+        ? t("modalCloneAccountTitle", { name: m.name })
+        : t("modalCloneConfigTitle", { name: m.name });
+
+    const modeSwitcher = isAccountClone
+      ? el("div", { className: "mh-seg-tabs", style: "margin-bottom:14px" }, [
+          el("button", {
+            className: `mh-seg-tab ${m.cloneAuthMode === "oauth" ? "is-active" : ""}`,
+            text: t("cloneModeOAuth"),
+            onClick: () => {
+              m.cloneAuthMode = "oauth";
+              render();
+            },
+          }),
+          el("button", {
+            className: `mh-seg-tab ${m.cloneAuthMode === "config" ? "is-active" : ""}`,
+            text: t("cloneModeConfig"),
+            onClick: () => {
+              m.cloneAuthMode = "config";
+              render();
+            },
+          }),
+        ])
+      : null;
+
+    if (isOAuthClone) {
+      const managed = managedTargets();
+      body = [
+        modeSwitcher,
+        el("p", { className: "mh-desc", text: t("cloneOAuthHint") }),
+        el("div", { className: "mh-form-grid" }, [
+          el("div", { className: "mh-field" }, [
+            el("label", { text: t("cloneAccountAliasLabel") }),
+            el("input", {
+              className: "mh-input",
+              placeholder: t("cloneAccountAliasPlaceholder"),
+              value: m.alias || "",
+              onInput: (e) => {
+                m.alias = e.target.value;
+              },
+            }),
+          ]),
+          el("div", { className: "mh-field" }, [
+            el("div", { className: "mh-ai-panel-head" }, [
+              el("label", { style: "margin:0", text: t("cloneAccountTargetsLabel") }),
+              el("div", { className: "mh-actions" }, [
+                el("button", {
+                  className: "mh-btn-link",
+                  text: t("btnSelectAll"),
+                  onClick: () => {
+                    m.targets = new Set(managed.map((tg) => tg.id));
+                    render();
+                  },
+                }),
+                el("button", {
+                  className: "mh-btn-link",
+                  text: t("btnSelectNone"),
+                  onClick: () => {
+                    m.targets = new Set();
+                    render();
+                  },
+                }),
+              ]),
+            ]),
+            el(
+              "div",
+              { className: "mh-ai-grid", style: "margin-top:6px" },
+              managed.map((tg) => {
+                const on = m.targets.has(tg.id);
+                return el(
+                  "button",
+                  {
+                    className: `mh-ai-tile ${on ? "is-selected-solid" : ""}`,
+                    onClick: () => {
+                      if (on) m.targets.delete(tg.id);
+                      else m.targets.add(tg.id);
+                      render();
+                    },
+                  },
+                  [
+                    el("span", { text: tg.shortName || tg.name }),
+                    el("span", { className: "mh-tile-mark", text: on ? "✓" : "" }),
+                  ],
+                );
+              }),
+            ),
+          ]),
+        ]),
+      ];
+    } else {
+      body = [
+        modeSwitcher,
+        m.isClone
+          ? el("p", {
+              className: "mh-desc",
+              text: isAccountClone ? t("modalCloneAccountConfigHint") : t("modalCloneConfigHint"),
+            })
+          : null,
+        renderServerFormFields(ctx, m, "targets"),
+      ];
+    }
+
     footer = [
       el("button", { className: "mh-btn", text: t("btnCancel"), onClick: close }),
       el("button", {
         className: "mh-btn mh-btn-primary",
-        text: t("btnSave"),
+        text: isOAuthClone ? t("cloneOAuthSubmitBtn") : t("btnSave"),
         onClick: async () => {
           try {
-            state.overview = await api.backend.invoke("servers/save", {
-              id: m.id,
+            const prevIds = new Set((state.overview?.servers ?? []).map((s) => s.id));
+            const transport = isOAuthClone
+              ? { type: m.transportType, url: m.url.trim(), headers: {} }
+              : buildTransportFromForm(m);
+            const payload = {
               name: m.name,
               alias: m.alias,
               description: m.description,
               enabled: m.enabled,
-              transport: buildTransportFromForm(m),
+              transport,
               targets: [...m.targets],
-            });
-            showToast(t("toastSaved", { name: m.name.trim() }));
+            };
+            if (m.id) payload.id = m.id;
+            state.overview = await api.backend.invoke("servers/save", payload);
+            const savedName = m.name.trim();
+            let created = null;
+            if (m.isClone) {
+              created = (state.overview?.servers ?? []).find(
+                (s) => s.name === savedName && !prevIds.has(s.id),
+              );
+              if (created) {
+                state.activeVariantByName[savedName] = created.id;
+              }
+            }
             state.modal = null;
             render();
+            if (isOAuthClone && created) {
+              void ctx.startOAuthLogin(created);
+            } else {
+              showToast(t("toastSaved", { name: savedName }));
+              void ctx.maybeProbeUncheckedAuthHints?.(state.overview);
+            }
           } catch (err) {
             showToast(err instanceof Error ? err.message : String(err), true);
           }
         },
+      }),
+    ];
+  } else if (m.type === "oauth-confirm") {
+    title = t("oauthConfirmTitle", { name: m.serverName });
+    body = [
+      el("p", { className: "mh-desc", text: t("oauthConfirmLead") }),
+      el("ul", { className: "mh-confirm-list" }, [
+        el("li", { text: t("oauthConfirmPoint1") }),
+        el("li", { text: t("oauthConfirmPoint2") }),
+        el("li", { text: t("oauthConfirmPoint3") }),
+      ]),
+    ];
+    footer = [
+      el("button", { className: "mh-btn", text: t("btnCancel"), onClick: close }),
+      el("button", {
+        className: "mh-btn mh-btn-primary",
+        text: t("oauthConfirmProceedBtn"),
+        onClick: () => {
+          const targetServer = m.server;
+          state.modal = null;
+          render();
+          void ctx.startOAuthLogin(targetServer);
+        },
+      }),
+    ];
+  } else if (m.type === "oauth-sync") {
+    const managed = managedTargets();
+    title = m.fromLogin
+      ? t("oauthModalTitle", { name: m.serverName })
+      : t("oauthModalSyncTitle", { name: m.serverName });
+    body = [
+      el("p", { className: "mh-desc", text: t("oauthModalDesc") }),
+      el("div", { className: "mh-note-box", style: "margin-bottom:12px" }, [
+        el("span", {
+          text: m.hasRefreshToken ? t("oauthModalAutoRefreshNote") : t("oauthModalNoRefreshNote"),
+        }),
+      ]),
+      el("div", { className: "mh-ai-panel-head" }, [
+        el("span", { text: t("oauthModalTargetsLabel", { count: m.targets.size }) }),
+        el("div", { className: "mh-actions" }, [
+          el("button", {
+            className: "mh-btn-link",
+            text: t("btnSelectAll"),
+            onClick: () => {
+              m.targets = new Set(managed.map((tg) => tg.id));
+              render();
+            },
+          }),
+          el("button", {
+            className: "mh-btn-link",
+            text: t("btnSelectNone"),
+            onClick: () => {
+              m.targets = new Set();
+              render();
+            },
+          }),
+        ]),
+      ]),
+      el(
+        "div",
+        { className: "mh-ai-grid", style: "margin-top:8px" },
+        managed.map((tg) => {
+          const on = m.targets.has(tg.id);
+          return el(
+            "button",
+            {
+              className: `mh-ai-tile ${on ? "is-selected-solid" : ""}`,
+              onClick: () => {
+                if (on) m.targets.delete(tg.id);
+                else m.targets.add(tg.id);
+                render();
+              },
+            },
+            [
+              el("span", { text: tg.shortName || tg.name }),
+              el("span", { className: "mh-tile-mark", text: on ? "✓" : "" }),
+            ],
+          );
+        }),
+      ),
+      m.targets.size === 0
+        ? el("p", {
+            className: "mh-desc",
+            style: "margin-top:10px;margin-bottom:0",
+            text: t("oauthModalSelectHint"),
+          })
+        : null,
+    ];
+    footer = [
+      el("button", {
+        className: "mh-btn",
+        disabled: state.syncing,
+        text: m.fromLogin ? t("oauthModalSkipBtn") : t("btnCancel"),
+        onClick: close,
+      }),
+      el("button", {
+        className: "mh-btn mh-btn-primary",
+        disabled: state.syncing || m.targets.size === 0,
+        text: state.syncing
+          ? t("oauthModalApplying")
+          : t("oauthModalApplyBtn", { count: m.targets.size }),
+        onClick: () => ctx.applyOAuthHeaderToTargets(m.serverId, m.serverName, [...m.targets]),
       }),
     ];
   } else if (m.type === "confirm-delete") {

@@ -21,6 +21,7 @@ import {
   getProjectTargetDescriptors,
   readTargetConfig,
 } from "./adapters.mjs";
+import { hasExplicitAuthHeader, normalizeOAuthServerKey, OAuthManager } from "./oauth.mjs";
 import { probeMcpServer } from "./probe.mjs";
 import { HubStore, normalizeAutoSyncConfig } from "./store.mjs";
 import { McpFileWatcher } from "./watcher.mjs";
@@ -33,6 +34,8 @@ export function createHubController({
   home = os.homedir(),
   platform = process.platform,
   watchDebounceMs = 750,
+  oauthRefreshIntervalMs = 60_000,
+  oauthRefreshThresholdMs = 5 * 60_000,
 }) {
   const store = new HubStore(dataDir);
   let mutex = Promise.resolve();
@@ -72,6 +75,41 @@ export function createHubController({
     onTargetChanged: (targetId) => handleWatchedTargetChange(targetId),
   });
 
+  const oauth = new OAuthManager({
+    dataDir,
+    onChange: () => {
+      revision++;
+    },
+  });
+
+  let lastKnownFeatures = { autoSyncEnabled: null, oauthEnabled: null };
+  let backgroundInitialized = false;
+  const sessionFailedAuthProbeUrls = new Set();
+  let authHintCheckInFlight = null;
+
+  async function readFeatureFlags() {
+    const settings = (await readSettings()) ?? {};
+    return {
+      autoSyncEnabled: settings.enableAutoSync !== false,
+      oauthEnabled: settings.enableBuiltinOAuth !== false,
+      settings,
+    };
+  }
+
+  function reconcileAutoSyncWithSetting(state, autoSyncFeatureEnabled) {
+    const cfg = normalizeAutoSyncConfig(state.autoSync);
+    if (autoSyncFeatureEnabled && cfg.lastPluginSetting !== true) {
+      state.autoSync = { ...cfg, enabled: true, lastPluginSetting: true };
+      baselineByTarget.clear();
+      return true;
+    }
+    if (!autoSyncFeatureEnabled && cfg.lastPluginSetting !== false) {
+      state.autoSync = { ...cfg, lastPluginSetting: false };
+      return true;
+    }
+    return false;
+  }
+
   function pushAutoSyncLog(entry) {
     autoSyncLogs = [
       {
@@ -99,7 +137,7 @@ export function createHubController({
     return snap;
   }
 
-  function resolveAutoSyncView(state, scannedTargets) {
+  function resolveAutoSyncView(state, scannedTargets, featureEnabled = true) {
     const cfg = normalizeAutoSyncConfig(state.autoSync);
     const activeIds = scannedTargets.filter((t) => t.enabled).map((t) => t.id);
     const activeSet = new Set(activeIds);
@@ -111,11 +149,14 @@ export function createHubController({
       cfg.primaryTargetId && activeSet.has(cfg.primaryTargetId)
         ? cfg.primaryTargetId
         : targetIds[0] || activeIds[0] || "";
+    const effectiveEnabled = Boolean(featureEnabled && cfg.enabled);
     return {
       ...cfg,
+      enabled: effectiveEnabled,
+      featureEnabled: Boolean(featureEnabled),
       targetIds,
       primaryTargetId,
-      watchingCount: cfg.enabled ? watcher.dirWatchers.size : 0,
+      watchingCount: effectiveEnabled ? watcher.dirWatchers.size : 0,
     };
   }
 
@@ -135,9 +176,13 @@ export function createHubController({
     return res;
   }
 
-  async function syncWatchers(state, scannedTargets) {
-    const cfg = resolveAutoSyncView(state, scannedTargets);
-    if (!cfg.enabled) {
+  async function syncWatchers(state, scannedTargets, featureEnabledOverride = null) {
+    const featureEnabled =
+      typeof featureEnabledOverride === "boolean"
+        ? featureEnabledOverride
+        : (await readFeatureFlags()).autoSyncEnabled;
+    const cfg = resolveAutoSyncView(state, scannedTargets, featureEnabled);
+    if (!featureEnabled || !cfg.enabled) {
       watcher.stopAll();
       return;
     }
@@ -369,6 +414,14 @@ export function createHubController({
       state.servers = state.servers.filter((s) => !removedIds.has(s.id));
       normalizeSingleVariantAlias(state, winnerServer.name);
     }
+    return [...removedIds];
+  }
+
+  async function cleanupRemovedServerOAuth(removedIds) {
+    for (const id of removedIds) {
+      oauth.cancelLogin(id);
+      await oauth.deleteCardToken(id);
+    }
   }
 
   function buildImportCandidates(state, targets) {
@@ -434,8 +487,24 @@ export function createHubController({
 
   async function buildOverview() {
     await ensureAutoSyncLogsLoaded();
+    const { autoSyncEnabled, oauthEnabled } = await readFeatureFlags();
     const state = await store.load();
+    if (oauthEnabled) {
+      await oauth.migrateLegacyTokens(state.servers);
+    }
     const targets = await scanTargets(state);
+    if (backgroundInitialized) {
+      if (reconcileAutoSyncWithSetting(state, autoSyncEnabled)) {
+        await store.save(state);
+        await syncWatchers(state, targets, autoSyncEnabled);
+      } else if (lastKnownFeatures.autoSyncEnabled !== autoSyncEnabled) {
+        await syncWatchers(state, targets, autoSyncEnabled);
+      }
+      if (lastKnownFeatures.oauthEnabled !== oauthEnabled) {
+        syncOAuthAutoRefresh(oauthEnabled);
+      }
+    }
+    lastKnownFeatures = { autoSyncEnabled, oauthEnabled };
     const diffs = targets.map((t) => {
       const d = computeTargetDiff(state, t, false);
       const { desired: _omit, ...publicDiff } = d;
@@ -447,53 +516,106 @@ export function createHubController({
       targets.map((t) => [t.id, new Map(t.nativeServers.map((s) => [s.name, s]))]),
     );
 
-    const enrichedServers = state.servers.map((s) => {
-      const builtin = detectBuiltinMcp(s.name, s.transport);
-      const targetStatuses = {};
-      for (const tg of targets) {
-        const native = nativeLookupByTarget.get(tg.id)?.get(s.name);
-        const ownerId = getManagedOwnerId(state, tg.id, s.name);
-        const selected = s.enabled && Array.isArray(s.targets) && s.targets.includes(tg.id);
-        const siblingWantsTarget = state.servers.some(
-          (other) =>
-            other.id !== s.id &&
-            other.name === s.name &&
-            other.enabled &&
-            Array.isArray(other.targets) &&
-            other.targets.includes(tg.id),
-        );
-        if (selected) {
-          if (!native) {
-            targetStatuses[tg.id] = "pending-add";
-          } else if (
-            transportSignature(native.transport) !== transportSignature(s.transport) ||
-            native.enabled === false
-          ) {
-            targetStatuses[tg.id] = "pending-update";
-          } else {
-            targetStatuses[tg.id] = "synced";
+    // Track URLs where at least one card is already OAuth-authenticated so sibling accounts always know login is supported
+    const oauthAuthedUrlKeys = new Set();
+    if (oauthEnabled) {
+      for (const s of state.servers) {
+        if (!s?.transport?.url || (s.transport.type !== "http" && s.transport.type !== "sse")) continue;
+        const st = await oauth.getPublicStatus(s.transport.url, s.id);
+        if (st?.authenticated) {
+          try {
+            oauthAuthedUrlKeys.add(normalizeOAuthServerKey(s.transport.url));
+          } catch {
+            // ignore
           }
-        } else if (
-          ownerId === s.id &&
-          !siblingWantsTarget &&
-          native &&
-          tg.enabled &&
-          !(native.isBuiltin && (!native.builtinOwnerTargetId || native.builtinOwnerTargetId === tg.id))
-        ) {
-          targetStatuses[tg.id] = "pending-remove";
-        } else {
-          targetStatuses[tg.id] = "off";
         }
       }
-      return {
-        ...s,
-        alias: typeof s.alias === "string" ? s.alias : "",
-        isLoopback: isCodexhostLoopbackServer(s.name, s.transport),
-        isBuiltin: builtin.isBuiltin,
-        builtinVendor: builtin.vendor,
-        targetStatuses,
-      };
-    });
+    }
+
+    const enrichedServers = await Promise.all(
+      state.servers.map(async (s) => {
+        const builtin = detectBuiltinMcp(s.name, s.transport);
+        const targetStatuses = {};
+        for (const tg of targets) {
+          const native = nativeLookupByTarget.get(tg.id)?.get(s.name);
+          const ownerId = getManagedOwnerId(state, tg.id, s.name);
+          const selected = s.enabled && Array.isArray(s.targets) && s.targets.includes(tg.id);
+          const siblingWantsTarget = state.servers.some(
+            (other) =>
+              other.id !== s.id &&
+              other.name === s.name &&
+              other.enabled &&
+              Array.isArray(other.targets) &&
+              other.targets.includes(tg.id),
+          );
+          if (selected) {
+            if (!native) {
+              targetStatuses[tg.id] = "pending-add";
+            } else if (
+              transportSignature(native.transport) !== transportSignature(s.transport) ||
+              native.enabled === false
+            ) {
+              targetStatuses[tg.id] = "pending-update";
+            } else {
+              targetStatuses[tg.id] = "synced";
+            }
+          } else if (
+            ownerId === s.id &&
+            !siblingWantsTarget &&
+            native &&
+            tg.enabled &&
+            !(native.isBuiltin && (!native.builtinOwnerTargetId || native.builtinOwnerTargetId === tg.id))
+          ) {
+            targetStatuses[tg.id] = "pending-remove";
+          } else {
+            targetStatuses[tg.id] = "off";
+          }
+        }
+        const isUrlTransport = s.transport?.type === "http" || s.transport?.type === "sse";
+        const isLoopback = isCodexhostLoopbackServer(s.name, s.transport);
+        const oauthStatus =
+          oauthEnabled && isUrlTransport && s.transport?.url
+            ? await oauth.getPublicStatus(s.transport.url, s.id)
+            : null;
+        const oauthPending =
+          oauthEnabled && isUrlTransport ? oauth.getPendingStatus(s.id) : null;
+        let oauthAuthHint = null;
+        let needsAuthCheck = false;
+        if (oauthEnabled && isUrlTransport && s.transport?.url && !isLoopback) {
+          try {
+            const urlKey = normalizeOAuthServerKey(s.transport.url);
+            const cached = state.authHintsByUrl?.[urlKey];
+            if (oauthAuthedUrlKeys.has(urlKey)) {
+              oauthAuthHint = {
+                needsAuth: true,
+                status: Number(cached?.status) || 401,
+              };
+            } else if (cached && typeof cached === "object") {
+              oauthAuthHint = {
+                needsAuth: Boolean(cached.needsAuth),
+                status: Number(cached.status) || (cached.needsAuth ? 401 : 200),
+              };
+            } else if (!oauthStatus?.authenticated && !sessionFailedAuthProbeUrls.has(urlKey)) {
+              needsAuthCheck = true;
+            }
+          } catch {
+            // Ignore malformed URLs
+          }
+        }
+        return {
+          ...s,
+          alias: typeof s.alias === "string" ? s.alias : "",
+          isLoopback,
+          isBuiltin: builtin.isBuiltin,
+          builtinVendor: builtin.vendor,
+          targetStatuses,
+          oauth: oauthStatus,
+          oauthPending: oauthPending && oauthPending.status !== "idle" ? oauthPending : null,
+          oauthAuthHint,
+          needsAuthCheck,
+        };
+      }),
+    );
 
     const syncedCountOf = (srv) =>
       Object.values(srv.targetStatuses ?? {}).filter((st) => st === "synced").length;
@@ -512,13 +634,17 @@ export function createHubController({
       0,
     );
     const { candidates: importCandidates, excludedBuiltins } = buildImportCandidates(state, targets);
-    const autoSync = resolveAutoSyncView(state, targets);
+    const autoSync = resolveAutoSyncView(state, targets, autoSyncEnabled);
 
     return {
       homeDir: home,
       platform,
       dataDir,
       revision,
+      features: {
+        autoSyncEnabled,
+        oauthEnabled,
+      },
       servers: enrichedServers,
       targets,
       diffs,
@@ -571,6 +697,9 @@ export function createHubController({
       if (existingIdx >= 0) {
         const prev = state.servers[existingIdx];
         const aliasChanged = alias !== (prev.alias ?? "");
+        const prevAuth = getAuthHeaderValue(prev.transport?.headers);
+        const nextAuth = getAuthHeaderValue(transport?.headers);
+        const keepOAuthManaged = Boolean(prev.oauthHeaderManaged && nextAuth && nextAuth === prevAuth);
         state.servers[existingIdx] = {
           ...prev,
           name,
@@ -580,6 +709,7 @@ export function createHubController({
           enabled,
           transport,
           targets,
+          oauthHeaderManaged: keepOAuthManaged,
           isLoopback: isCodexhostLoopbackServer(name, transport),
           updatedAt: now,
         };
@@ -614,6 +744,8 @@ export function createHubController({
       state.servers = state.servers.filter((s) => s.id !== id);
       normalizeSingleVariantAlias(state, target.name);
       await store.save(state);
+      oauth.cancelLogin(id);
+      await oauth.deleteCardToken(id);
       return buildOverview();
     });
   }
@@ -712,7 +844,7 @@ export function createHubController({
             clearManagedOwner(state, target.id, server.name);
           } else {
             await writeTargetSafe(target, { [server.name]: server }, []);
-            releaseSiblingTargetClaims(state, server, target.id);
+            await cleanupRemovedServerOAuth(releaseSiblingTargetClaims(state, server, target.id));
             setManagedOwner(state, target.id, server.name, server.id);
           }
           updatedCount++;
@@ -851,7 +983,7 @@ export function createHubController({
           await writeTargetSafe(target, upserts, removals);
           for (const name of removals) clearManagedOwner(state, target.id, name);
           for (const [name, srv] of Object.entries(upserts)) {
-            releaseSiblingTargetClaims(state, srv, target.id);
+            await cleanupRemovedServerOAuth(releaseSiblingTargetClaims(state, srv, target.id));
             setManagedOwner(state, target.id, name, srv.id);
           }
 
@@ -1195,7 +1327,7 @@ export function createHubController({
 
           for (const name of diff.removes) clearManagedOwner(state, target.id, name);
           for (const [name, srv] of Object.entries(diff.desired)) {
-            releaseSiblingTargetClaims(state, srv, target.id);
+            await cleanupRemovedServerOAuth(releaseSiblingTargetClaims(state, srv, target.id));
             setManagedOwner(state, target.id, name, srv.id);
           }
 
@@ -1381,14 +1513,151 @@ export function createHubController({
   }
 
   async function probeServer({ id, server }) {
-    const settings = await readSettings();
+    const { oauthEnabled, settings } = await readFeatureFlags();
     let target = server;
     if (!target && id) {
       const state = await store.load();
       target = state.servers.find((s) => s.id === id);
     }
     if (!target) throw new Error("Server not found");
-    return probeMcpServer(target, settings.httpProbeTimeoutMs ?? 4000);
+    const timeoutMs = settings.httpProbeTimeoutMs ?? 4000;
+    const isUrl = target.transport?.type === "http" || target.transport?.type === "sse";
+    let extraHeaders = null;
+    let usedOAuth = false;
+    if (oauthEnabled && isUrl && target.transport?.url && !hasExplicitAuthHeader(target.transport?.headers)) {
+      const token = await oauth.getValidAccessToken(target.transport.url, timeoutMs, target.id || null);
+      if (token?.accessToken) {
+        extraHeaders = { Authorization: `${token.tokenType || "Bearer"} ${token.accessToken}` };
+        usedOAuth = true;
+      }
+    }
+    const res = await probeMcpServer(target, timeoutMs, extraHeaders);
+    // Keep persistent auth hint cache calibrated on manual probes:
+    // - 401/403 (needsAuth: true) ALWAYS records needsAuth = true.
+    // - 200 OK ONLY records needsAuth = false when NO Authorization header was sent (neither OAuth nor explicit header),
+    //   so an authenticated card getting 200 OK never erases the login hint for sibling unauthenticated cards.
+    const sentAuthHeader = usedOAuth || hasExplicitAuthHeader(target.transport?.headers);
+    if (
+      isUrl &&
+      target.transport?.url &&
+      !isCodexhostLoopbackServer(target.name, target.transport) &&
+      res.ok &&
+      (res.needsAuth || !sentAuthHeader)
+    ) {
+      try {
+        const urlKey = normalizeOAuthServerKey(target.transport.url);
+        sessionFailedAuthProbeUrls.delete(urlKey);
+        await serialize(async () => {
+          const st = await store.load();
+          st.authHintsByUrl ??= {};
+          const prev = st.authHintsByUrl[urlKey];
+          const nextNeeds = Boolean(res.needsAuth);
+          const nextStatus = Number(res.status) || (nextNeeds ? 401 : 200);
+          if (!prev || prev.needsAuth !== nextNeeds || prev.status !== nextStatus) {
+            st.authHintsByUrl[urlKey] = {
+              needsAuth: nextNeeds,
+              status: nextStatus,
+              checkedAt: new Date().toISOString(),
+            };
+            await store.save(st);
+          }
+        });
+      } catch {
+        // Ignore cache write errors
+      }
+    }
+    return usedOAuth ? { ...res, usedOAuth: true } : res;
+  }
+
+  async function probeUncheckedAuthHints() {
+    if (authHintCheckInFlight) return authHintCheckInFlight;
+    const work = (async () => {
+      const { oauthEnabled, settings } = await readFeatureFlags();
+      if (!oauthEnabled) return { checked: 0, needsAuthCount: 0 };
+
+      const state = await store.load();
+      const candidatesByUrlKey = new Map();
+      for (const s of state.servers) {
+        if (!s?.transport?.url || (s.transport.type !== "http" && s.transport.type !== "sse")) continue;
+        if (isCodexhostLoopbackServer(s.name, s.transport)) continue;
+        let urlKey;
+        try {
+          urlKey = normalizeOAuthServerKey(s.transport.url);
+        } catch {
+          continue;
+        }
+        if (state.authHintsByUrl?.[urlKey] || sessionFailedAuthProbeUrls.has(urlKey)) continue;
+        const oauthSt = await oauth.getPublicStatus(s.transport.url, s.id);
+        if (oauthSt?.authenticated) continue;
+        if (!candidatesByUrlKey.has(urlKey)) {
+          candidatesByUrlKey.set(urlKey, s);
+        }
+      }
+
+      if (candidatesByUrlKey.size === 0) {
+        return { checked: 0, needsAuthCount: 0 };
+      }
+
+      const entries = [...candidatesByUrlKey.entries()];
+      const probeTimeout = Math.min(settings.httpProbeTimeoutMs ?? 4000, 3500);
+      const discovered = new Map();
+      const concurrency = 3;
+      let cursor = 0;
+
+      const worker = async () => {
+        while (cursor < entries.length) {
+          const [urlKey, srv] = entries[cursor++];
+          try {
+            const res = await probeMcpServer(srv, probeTimeout);
+            if (res.ok) {
+              const sentExplicitAuth = hasExplicitAuthHeader(srv.transport?.headers);
+              if (res.needsAuth || !sentExplicitAuth) {
+                discovered.set(urlKey, {
+                  needsAuth: Boolean(res.needsAuth),
+                  status: Number(res.status) || (res.needsAuth ? 401 : 200),
+                  checkedAt: new Date().toISOString(),
+                });
+              } else {
+                sessionFailedAuthProbeUrls.add(urlKey);
+              }
+            } else {
+              sessionFailedAuthProbeUrls.add(urlKey);
+            }
+          } catch {
+            sessionFailedAuthProbeUrls.add(urlKey);
+          }
+        }
+      };
+
+      await Promise.all(Array.from({ length: Math.min(concurrency, entries.length) }, () => worker()));
+
+      let needsAuthCount = 0;
+      if (discovered.size > 0) {
+        await serialize(async () => {
+          const freshState = await store.load();
+          freshState.authHintsByUrl ??= {};
+          for (const [urlKey, hint] of discovered.entries()) {
+            freshState.authHintsByUrl[urlKey] = hint;
+            if (hint.needsAuth) needsAuthCount++;
+          }
+          await store.save(freshState);
+          revision++;
+        });
+      }
+
+      return {
+        checked: entries.length,
+        needsAuthCount,
+        overview: discovered.size > 0 ? await buildOverview() : null,
+      };
+    })();
+
+    authHintCheckInFlight = work;
+    try {
+      return await work;
+    } finally {
+      authHintCheckInFlight = null;
+    }
   }
 
   async function listBackups() {
@@ -1418,9 +1687,11 @@ export function createHubController({
   async function handleWatchedTargetChange(sourceTargetId) {
     return serialize(async () => {
       await ensureAutoSyncLogsLoaded();
+      const { autoSyncEnabled } = await readFeatureFlags();
+      if (!autoSyncEnabled) return { propagated: 0 };
       const state = await store.load();
       const scanned = await scanTargets(state);
-      const cfg = resolveAutoSyncView(state, scanned);
+      const cfg = resolveAutoSyncView(state, scanned, autoSyncEnabled);
       if (!cfg.enabled) return { propagated: 0 };
 
       const targets = resolveTargets(state);
@@ -1748,18 +2019,157 @@ export function createHubController({
     };
   }
 
+  function getAuthHeaderValue(headers) {
+    if (!headers || typeof headers !== "object") return "";
+    for (const [k, v] of Object.entries(headers)) {
+      if (k.toLowerCase() === "authorization") return String(v ?? "").trim();
+    }
+    return "";
+  }
+
+  function syncOAuthAutoRefresh(oauthEnabled) {
+    if (oauthEnabled) {
+      oauth.startAutoRefresh({
+        intervalMs: oauthRefreshIntervalMs,
+        thresholdMs: oauthRefreshThresholdMs,
+        onRefreshed: (item) => propagateRefreshedOAuthToken(item),
+      });
+    } else {
+      oauth.stopAutoRefresh();
+    }
+  }
+
+  async function propagateRefreshedOAuthToken({
+    serverId = null,
+    serverKey,
+    previousAccessToken = "",
+    accessToken,
+    tokenType = "Bearer",
+  }) {
+    if (!serverKey || !accessToken) return { updatedTargets: 0 };
+    return serialize(async () => {
+      const { oauthEnabled } = await readFeatureFlags();
+      if (!oauthEnabled) return { updatedTargets: 0 };
+      const state = await store.load();
+      const scanned = await scanTargets(state);
+      const targetsById = new Map(resolveTargets(state).map((t) => [t.id, t]));
+      const scanById = new Map(scanned.map((t) => [t.id, t]));
+      const nextAuthValue = `${tokenType || "Bearer"} ${accessToken}`;
+      const now = new Date().toISOString();
+
+      let stateDirty = false;
+      let updatedTargets = 0;
+
+      for (let i = 0; i < state.servers.length; i++) {
+        const srv = state.servers[i];
+        if (!srv?.transport?.url || (srv.transport.type !== "http" && srv.transport.type !== "sse")) {
+          continue;
+        }
+        // Strict per-card isolation: when token belongs to a specific card, never touch sibling variants
+        if (serverId && srv.id !== serverId) continue;
+        let srvKey;
+        try {
+          srvKey = normalizeOAuthServerKey(srv.transport.url);
+        } catch {
+          continue;
+        }
+        if (srvKey !== serverKey) continue;
+
+        const currentAuth = getAuthHeaderValue(srv.transport.headers);
+        const matchesPrev = Boolean(previousAccessToken && currentAuth.endsWith(` ${previousAccessToken}`));
+        if (!srv.oauthHeaderManaged && !matchesPrev) continue;
+
+        const nextHeaders = { ...(srv.transport.headers ?? {}) };
+        for (const k of Object.keys(nextHeaders)) {
+          if (k.toLowerCase() === "authorization") delete nextHeaders[k];
+        }
+        nextHeaders.Authorization = nextAuthValue;
+
+        const updatedSrv = {
+          ...srv,
+          oauthHeaderManaged: true,
+          transport: {
+            ...srv.transport,
+            headers: nextHeaders,
+          },
+          updatedAt: now,
+        };
+        state.servers[i] = updatedSrv;
+        stateDirty = true;
+
+        if (!updatedSrv.enabled) continue;
+        for (const targetId of updatedSrv.targets ?? []) {
+          const tg = targetsById.get(targetId);
+          const scan = scanById.get(targetId);
+          if (!tg || !scan || !scan.enabled || !scan.exists || scan.error) continue;
+          const native = scan.nativeServers.find((ns) => ns.name === updatedSrv.name);
+          if (!native) continue; // Only rotate already-synced AIs; never push to unapplied targets
+          const ownerId = getManagedOwnerId(state, targetId, updatedSrv.name);
+          const nativeAuth = getAuthHeaderValue(native.transport?.headers);
+          const nativeMatchesPrev = Boolean(previousAccessToken && nativeAuth.endsWith(` ${previousAccessToken}`));
+          if (ownerId && ownerId !== updatedSrv.id && !nativeMatchesPrev) continue;
+          if (!ownerId && !nativeMatchesPrev) continue;
+          try {
+            await writeTargetSafe(tg, { [updatedSrv.name]: updatedSrv }, []);
+            setManagedOwner(state, targetId, updatedSrv.name, updatedSrv.id);
+            updatedTargets++;
+          } catch {
+            // Keep rotating remaining targets
+          }
+        }
+      }
+
+      if (stateDirty) {
+        await store.save(state);
+        revision++;
+      }
+      return { updatedTargets };
+    });
+  }
+
+  async function runOAuthAutoRefreshCheck() {
+    const { oauthEnabled, settings } = await readFeatureFlags();
+    if (!oauthEnabled) return { refreshedCount: 0, updatedTargets: 0 };
+    const refreshed = await oauth.refreshDueTokens({
+      thresholdMs: oauthRefreshThresholdMs,
+      timeoutMs: Math.max(5000, settings.httpProbeTimeoutMs ?? 4000),
+    });
+    let updatedTargets = 0;
+    for (const item of refreshed) {
+      const res = await propagateRefreshedOAuthToken(item);
+      updatedTargets += res.updatedTargets;
+    }
+    return { refreshedCount: refreshed.length, updatedTargets };
+  }
+
   async function initAutoSync() {
+    backgroundInitialized = true;
     await ensureAutoSyncLogsLoaded();
+    const { autoSyncEnabled, oauthEnabled } = await readFeatureFlags();
     const state = await store.load();
+    if (oauthEnabled) {
+      await oauth.migrateLegacyTokens(state.servers);
+    }
     const scanned = await scanTargets(state);
-    await syncWatchers(state, scanned);
+    if (reconcileAutoSyncWithSetting(state, autoSyncEnabled)) {
+      await store.save(state);
+    }
+    lastKnownFeatures = { autoSyncEnabled, oauthEnabled };
+    await syncWatchers(state, scanned, autoSyncEnabled);
+    syncOAuthAutoRefresh(oauthEnabled);
   }
 
   async function setAutoSyncConfig(patch) {
+    backgroundInitialized = true;
     return serialize(async () => {
+      const { autoSyncEnabled } = await readFeatureFlags();
       const state = await store.load();
       const prev = normalizeAutoSyncConfig(state.autoSync);
-      const next = normalizeAutoSyncConfig({ ...prev, ...(patch ?? {}) });
+      const next = normalizeAutoSyncConfig({
+        ...prev,
+        ...(patch ?? {}),
+        lastPluginSetting: autoSyncEnabled,
+      });
       state.autoSync = next;
       await store.save(state);
       const scanned = await scanTargets(state);
@@ -1767,7 +2177,7 @@ export function createHubController({
       if (next.enabled && !prev.enabled) {
         baselineByTarget.clear();
       }
-      await syncWatchers(state, scanned);
+      await syncWatchers(state, scanned, autoSyncEnabled);
       revision++;
       return buildOverview();
     });
@@ -1781,12 +2191,149 @@ export function createHubController({
     return { ok: true, revision };
   }
 
-  function getRevision() {
+  async function oauthStart({ id }) {
+    const { oauthEnabled, settings } = await readFeatureFlags();
+    if (!oauthEnabled) {
+      throw new Error("Built-in OAuth is disabled in extension settings");
+    }
+    const state = await store.load();
+    const server = state.servers.find((s) => s.id === id);
+    if (!server) throw new Error("Server not found");
+    return oauth.startLogin(server, Math.max(5000, settings.httpProbeTimeoutMs ?? 4000));
+  }
+
+  async function oauthStatus({ id }) {
+    const pending = oauth.getPendingStatus(id);
+    const state = await store.load();
+    const server = state.servers.find((s) => s.id === id);
+    const tokenStatus =
+      server?.transport?.url && (server.transport.type === "http" || server.transport.type === "sse")
+        ? await oauth.getPublicStatus(server.transport.url, server.id)
+        : null;
+    return { pending, oauth: tokenStatus };
+  }
+
+  async function oauthCancel({ id }) {
+    return oauth.cancelLogin(id);
+  }
+
+  async function oauthRefresh({ id }) {
+    const { oauthEnabled, settings } = await readFeatureFlags();
+    if (!oauthEnabled) {
+      throw new Error("Built-in OAuth is disabled in extension settings");
+    }
+    const state = await store.load();
+    const server = state.servers.find((s) => s.id === id);
+    if (!server?.transport?.url) throw new Error("Server not found");
+    const details = await oauth.refreshTokenWithDetails(
+      server.transport.url,
+      Math.max(5000, settings.httpProbeTimeoutMs ?? 4000),
+      server.id,
+    );
+    const prop = await propagateRefreshedOAuthToken(details);
+    return {
+      oauth: details.status,
+      updatedTargets: prop.updatedTargets,
+      overview: await buildOverview(),
+    };
+  }
+
+  async function oauthLogout({ id }) {
+    return serialize(async () => {
+      const state = await store.load();
+      const idx = state.servers.findIndex((s) => s.id === id);
+      if (idx === -1 || !state.servers[idx]?.transport?.url) throw new Error("Server not found");
+      const server = state.servers[idx];
+      oauth.cancelLogin(id);
+      await oauth.logout(server.transport.url, server.id);
+      if (server.oauthHeaderManaged) {
+        const nextHeaders = { ...(server.transport.headers ?? {}) };
+        for (const k of Object.keys(nextHeaders)) {
+          if (k.toLowerCase() === "authorization") delete nextHeaders[k];
+        }
+        state.servers[idx] = {
+          ...server,
+          oauthHeaderManaged: false,
+          transport: {
+            ...server.transport,
+            headers: nextHeaders,
+          },
+          updatedAt: new Date().toISOString(),
+        };
+        await store.save(state);
+      }
+      return buildOverview();
+    });
+  }
+
+  async function oauthApplyHeader({ id }) {
+    return serialize(async () => {
+      const { oauthEnabled, settings } = await readFeatureFlags();
+      if (!oauthEnabled) {
+        throw new Error("Built-in OAuth is disabled in extension settings");
+      }
+      const state = await store.load();
+      const idx = state.servers.findIndex((s) => s.id === id);
+      if (idx === -1) throw new Error("Server not found");
+      const server = state.servers[idx];
+      if (!server.transport?.url || (server.transport.type !== "http" && server.transport.type !== "sse")) {
+        throw new Error("OAuth Header sync is only supported for HTTP or SSE MCP servers");
+      }
+      const token = await oauth.getValidAccessToken(
+        server.transport.url,
+        Math.max(5000, settings.httpProbeTimeoutMs ?? 4000),
+        server.id,
+      );
+      if (!token?.accessToken) {
+        throw new Error("No valid OAuth token found — please log in again");
+      }
+      const nextHeaders = { ...(server.transport.headers ?? {}) };
+      for (const k of Object.keys(nextHeaders)) {
+        if (k.toLowerCase() === "authorization") delete nextHeaders[k];
+      }
+      nextHeaders.Authorization = `${token.tokenType || "Bearer"} ${token.accessToken}`;
+      state.servers[idx] = {
+        ...server,
+        oauthHeaderManaged: true,
+        transport: {
+          ...server.transport,
+          headers: nextHeaders,
+        },
+        updatedAt: new Date().toISOString(),
+      };
+      await store.save(state);
+      revision++;
+      return buildOverview();
+    });
+  }
+
+  async function getRevision() {
+    const { autoSyncEnabled, oauthEnabled } = await readFeatureFlags();
+    if (
+      lastKnownFeatures.autoSyncEnabled !== null &&
+      (lastKnownFeatures.autoSyncEnabled !== autoSyncEnabled ||
+        lastKnownFeatures.oauthEnabled !== oauthEnabled)
+    ) {
+      await serialize(async () => {
+        const state = await store.load();
+        const scanned = await scanTargets(state);
+        if (backgroundInitialized) {
+          if (reconcileAutoSyncWithSetting(state, autoSyncEnabled)) {
+            await store.save(state);
+          }
+          await syncWatchers(state, scanned, autoSyncEnabled);
+          syncOAuthAutoRefresh(oauthEnabled);
+        }
+        lastKnownFeatures = { autoSyncEnabled, oauthEnabled };
+        revision++;
+      });
+    }
     return { revision };
   }
 
   function dispose() {
     watcher.dispose();
+    oauth.dispose();
   }
 
   return {
@@ -1817,6 +2364,14 @@ export function createHubController({
     scanProject,
     syncProject,
     probeServer,
+    oauthStart,
+    oauthStatus,
+    oauthCancel,
+    oauthRefresh,
+    oauthLogout,
+    oauthApplyHeader,
+    probeUncheckedAuthHints,
+    runOAuthAutoRefreshCheck,
     listBackups,
     restoreBackup,
   };
@@ -1844,6 +2399,13 @@ export async function activate(ctx) {
   ctx.handle("servers/import-json", (params) => controller.importJson(params ?? {}));
   ctx.handle("servers/import-from-target", (params) => controller.importFromTarget(params ?? {}));
   ctx.handle("servers/probe", (params) => controller.probeServer(params ?? {}));
+  ctx.handle("oauth/start", (params) => controller.oauthStart(params ?? {}));
+  ctx.handle("oauth/status", (params) => controller.oauthStatus(params ?? {}));
+  ctx.handle("oauth/cancel", (params) => controller.oauthCancel(params ?? {}));
+  ctx.handle("oauth/refresh", (params) => controller.oauthRefresh(params ?? {}));
+  ctx.handle("oauth/logout", (params) => controller.oauthLogout(params ?? {}));
+  ctx.handle("oauth/apply-header", (params) => controller.oauthApplyHeader(params ?? {}));
+  ctx.handle("oauth/probe-auth-hints", () => controller.probeUncheckedAuthHints());
   ctx.handle("sync/preview", (params) => controller.previewSync(params ?? {}));
   ctx.handle("sync/apply", (params) => controller.applySync(params ?? {}));
   ctx.handle("targets/set-enabled", (params) => controller.setTargetEnabled(params ?? {}));

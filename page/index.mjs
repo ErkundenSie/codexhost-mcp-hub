@@ -37,6 +37,10 @@ export async function mount(root, api) {
     probes: {},
     probingIds: new Set(),
     expandedToolIds: new Set(),
+    activeVariantByName: {},
+    oauthStartingIds: new Set(),
+    oauthBusyIds: new Set(),
+    oauthPendingById: {},
     modal: null,
     toasts: [],
   };
@@ -104,6 +108,117 @@ export async function mount(root, api) {
     api.signal.addEventListener("abort", () => clearTimeout(timer), { once: true });
   }
 
+  const oauthPollTimers = new Map();
+
+  function stopOAuthPolling(serverId) {
+    const timer = oauthPollTimers.get(serverId);
+    if (timer) {
+      clearInterval(timer);
+      oauthPollTimers.delete(serverId);
+    }
+  }
+
+  function ensureOAuthPolling(serverId, serverName) {
+    if (oauthPollTimers.has(serverId)) return;
+    let inFlight = false;
+    const timer = setInterval(async () => {
+      if (api.signal.aborted || inFlight) return;
+      if (!state.oauthPendingById[serverId]) {
+        stopOAuthPolling(serverId);
+        return;
+      }
+      inFlight = true;
+      try {
+        const res = await api.backend.invoke("oauth/status", { id: serverId });
+        const status = res?.pending?.status;
+        if (status === "completed") {
+          stopOAuthPolling(serverId);
+          delete state.oauthPendingById[serverId];
+          showToast(t("oauthToastSuccess", { name: serverName }));
+          await refreshOverview(true);
+          const fresh = (state.overview?.servers ?? []).find((s) => s.id === serverId);
+          if (fresh) {
+            openOAuthSyncModal(fresh, true);
+            void probeServer(fresh);
+          }
+          return;
+        }
+        if (status === "error") {
+          stopOAuthPolling(serverId);
+          delete state.oauthPendingById[serverId];
+          showToast(
+            t("oauthToastFailed", {
+              name: serverName,
+              error: res.pending.error || "Unknown error",
+            }),
+            true,
+          );
+          render();
+          return;
+        }
+        if (status === "idle") {
+          stopOAuthPolling(serverId);
+          delete state.oauthPendingById[serverId];
+          render();
+          return;
+        }
+        // Still pending — re-render so countdown ticks smoothly
+        render();
+      } catch {
+        // Ignore transient poll errors
+      } finally {
+        inFlight = false;
+      }
+    }, 1200);
+    oauthPollTimers.set(serverId, timer);
+  }
+
+  function hydratePendingOAuth(overview) {
+    const oauthOn = Boolean(overview?.features?.oauthEnabled);
+    if (!oauthOn) {
+      for (const id of [...oauthPollTimers.keys()]) stopOAuthPolling(id);
+      state.oauthPendingById = {};
+      return;
+    }
+    const activeIds = new Set();
+    for (const srv of overview?.servers ?? []) {
+      if (srv.oauthPending && srv.oauthPending.status === "pending") {
+        activeIds.add(srv.id);
+        state.oauthPendingById[srv.id] = srv.oauthPending;
+        ensureOAuthPolling(srv.id, srv.name);
+      }
+    }
+    for (const id of Object.keys(state.oauthPendingById)) {
+      if (!activeIds.has(id)) {
+        stopOAuthPolling(id);
+        delete state.oauthPendingById[id];
+      }
+    }
+  }
+
+  let authHintProbeInFlight = false;
+
+  async function maybeProbeUncheckedAuthHints(overview) {
+    if (api.signal.aborted || authHintProbeInFlight) return;
+    if (!overview?.features?.oauthEnabled) return;
+    const hasUnchecked = (overview.servers ?? []).some((s) => s.needsAuthCheck);
+    if (!hasUnchecked) return;
+    authHintProbeInFlight = true;
+    try {
+      const res = await api.backend.invoke("oauth/probe-auth-hints");
+      if (api.signal.aborted) return;
+      if (res?.overview) {
+        state.overview = res.overview;
+        hydratePendingOAuth(state.overview);
+        render();
+      }
+    } catch {
+      // Ignore silent background discovery errors
+    } finally {
+      authHintProbeInFlight = false;
+    }
+  }
+
   async function refreshOverview(silent = false) {
     if (!silent) {
       state.loading = true;
@@ -111,6 +226,8 @@ export async function mount(root, api) {
     }
     try {
       state.overview = await api.backend.invoke("overview");
+      hydratePendingOAuth(state.overview);
+      void maybeProbeUncheckedAuthHints(state.overview);
     } catch (err) {
       showToast(err instanceof Error ? err.message : String(err), true);
     } finally {
@@ -206,6 +323,7 @@ export async function mount(root, api) {
     const tr = server?.transport ?? { type: "stdio", command: "", args: [], env: {} };
     state.modal = {
       type: "edit-server",
+      isClone: false,
       id: server.id,
       name: server.name ?? "",
       alias: server.alias ?? "",
@@ -220,6 +338,60 @@ export async function mount(root, api) {
       headersText: formatKvLines(tr.headers, ": "),
       bearerTokenEnvVar: tr.bearerTokenEnvVar || "",
       targets: new Set(server.targets ?? []),
+    };
+    render();
+  }
+
+  function openCloneServerModal(server) {
+    const tr = server?.transport ?? { type: "stdio", command: "", args: [], env: {} };
+    const oauthFeatureOn = Boolean(state.overview?.features?.oauthEnabled);
+    const isUrlTransport = tr.type === "http" || tr.type === "sse";
+    const isAccountMode = Boolean(oauthFeatureOn && isUrlTransport);
+    const existingAliases = new Set(
+      (state.overview?.servers ?? [])
+        .filter((s) => s.name === server.name)
+        .map((s) => (s.alias || "").trim()),
+    );
+    const isZh = state.locale.toLowerCase().startsWith("zh");
+    const prefix = isAccountMode
+      ? isZh
+        ? "账号 "
+        : "Account "
+      : isZh
+        ? "配置 "
+        : "Config ";
+    let idx = 2;
+    let suggestedAlias = `${prefix}${idx}`;
+    while (existingAliases.has(suggestedAlias)) {
+      idx++;
+      suggestedAlias = `${prefix}${idx}`;
+    }
+    // Strip OAuth-managed Authorization header so the cloned variant starts clean for a separate account
+    const clonedHeaders = { ...(tr.headers ?? {}) };
+    if (isAccountMode && (server.oauthHeaderManaged || server.oauth?.authenticated)) {
+      for (const k of Object.keys(clonedHeaders)) {
+        if (k.toLowerCase() === "authorization") delete clonedHeaders[k];
+      }
+    }
+    state.modal = {
+      type: "edit-server",
+      isClone: true,
+      isAccountMode,
+      cloneAuthMode: isAccountMode ? "oauth" : "config",
+      id: null,
+      name: server.name ?? "",
+      alias: suggestedAlias,
+      description: server.description ?? "",
+      enabled: true,
+      transportType: tr.type || "stdio",
+      command: tr.command || "",
+      argsText: (tr.args ?? []).join("\n"),
+      cwd: tr.cwd || "",
+      envText: formatKvLines(tr.env, "="),
+      url: tr.url || "",
+      headersText: formatKvLines(clonedHeaders, ": "),
+      bearerTokenEnvVar: tr.bearerTokenEnvVar || "",
+      targets: new Set(),
     };
     render();
   }
@@ -272,6 +444,162 @@ export async function mount(root, api) {
     } finally {
       state.probingIds.delete(server.id);
       render();
+    }
+  }
+
+  async function startOAuthLogin(server) {
+    state.oauthStartingIds.add(server.id);
+    render();
+    try {
+      const res = await api.backend.invoke("oauth/start", { id: server.id });
+      state.oauthPendingById[server.id] = {
+        status: "pending",
+        sessionId: res.sessionId,
+        authUrl: res.authUrl,
+        redirectUri: res.redirectUri,
+        expiresAt: res.expiresAt,
+      };
+      ensureOAuthPolling(server.id, server.name);
+      showToast(t("oauthToastStarted", { name: server.name }));
+      try {
+        window.open(res.authUrl, "_blank", "noopener,noreferrer");
+      } catch {
+        // Fallback link button is always shown in the waiting bar
+      }
+    } catch (err) {
+      showToast(
+        t("oauthToastFailed", {
+          name: server.name,
+          error: err instanceof Error ? err.message : String(err),
+        }),
+        true,
+      );
+    } finally {
+      state.oauthStartingIds.delete(server.id);
+      render();
+    }
+  }
+
+  async function cancelOAuthLogin(server) {
+    stopOAuthPolling(server.id);
+    delete state.oauthPendingById[server.id];
+    render();
+    try {
+      await api.backend.invoke("oauth/cancel", { id: server.id });
+      showToast(t("oauthToastCancelled", { name: server.name }));
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : String(err), true);
+    }
+  }
+
+  async function refreshOAuthToken(server) {
+    state.oauthBusyIds.add(server.id);
+    render();
+    try {
+      const res = await api.backend.invoke("oauth/refresh", { id: server.id });
+      if (res?.overview) {
+        state.overview = res.overview;
+        hydratePendingOAuth(state.overview);
+      }
+      showToast(
+        res?.updatedTargets > 0
+          ? t("oauthToastRefreshedSynced", { name: server.name, count: res.updatedTargets })
+          : t("oauthToastRefreshed", { name: server.name }),
+      );
+      const fresh = (state.overview?.servers ?? []).find((s) => s.id === server.id) || server;
+      void probeServer(fresh);
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : String(err), true);
+    } finally {
+      state.oauthBusyIds.delete(server.id);
+      render();
+    }
+  }
+
+  async function logoutOAuth(server) {
+    state.oauthBusyIds.add(server.id);
+    render();
+    try {
+      stopOAuthPolling(server.id);
+      delete state.oauthPendingById[server.id];
+      state.overview = await api.backend.invoke("oauth/logout", { id: server.id });
+      hydratePendingOAuth(state.overview);
+      if (state.probes[server.id]?.usedOAuth) {
+        delete state.probes[server.id];
+      }
+      showToast(t("oauthToastLoggedOut", { name: server.name }));
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : String(err), true);
+    } finally {
+      state.oauthBusyIds.delete(server.id);
+      render();
+    }
+  }
+
+  function openOAuthConfirmModal(server) {
+    state.modal = {
+      type: "oauth-confirm",
+      server,
+      serverName: server.alias ? `${server.name}（${server.alias}）` : server.name,
+    };
+    render();
+  }
+
+  function openOAuthSyncModal(server, fromLogin = false) {
+    const managedIds = new Set(managedTargetIds());
+    const initialTargets = (server.targets ?? []).filter((id) => managedIds.has(id));
+    state.modal = {
+      type: "oauth-sync",
+      fromLogin,
+      serverId: server.id,
+      serverName: server.alias ? `${server.name}（${server.alias}）` : server.name,
+      hasRefreshToken: Boolean(server.oauth?.hasRefreshToken),
+      targets: new Set(initialTargets),
+    };
+    render();
+  }
+
+  async function applyOAuthHeaderToTargets(serverId, serverDisplayName, targetIds) {
+    state.syncing = true;
+    state.oauthBusyIds.add(serverId);
+    render();
+    try {
+      await api.backend.invoke("servers/set-targets", {
+        id: serverId,
+        targets: [...targetIds],
+        autoEnable: true,
+      });
+      await api.backend.invoke("oauth/apply-header", { id: serverId });
+      const res = await api.backend.invoke("servers/apply-single", { id: serverId });
+      state.overview = res.overview;
+      hydratePendingOAuth(state.overview);
+      state.modal = null;
+      if (res.errorCount > 0) {
+        showToast(t("syncPartialErr", { count: res.errorCount }), true);
+      } else {
+        showToast(
+          t("oauthToastHeaderApplied", {
+            name: serverDisplayName,
+            count: res.updatedCount || targetIds.length,
+          }),
+        );
+      }
+      if (state.tab === "project-backups") await refreshBackups();
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : String(err), true);
+    } finally {
+      state.syncing = false;
+      state.oauthBusyIds.delete(serverId);
+      render();
+    }
+  }
+
+  async function copyOAuthLink(url) {
+    try {
+      await navigator.clipboard.writeText(url);
+      showToast(t("oauthToastLinkCopied"));
+    } catch {
+      showToast(url);
     }
   }
 
@@ -354,7 +682,8 @@ export async function mount(root, api) {
   function renderTabs() {
     const serverCount = (state.overview?.servers ?? []).length;
     const managedCount = managedTargets().length;
-    const autoSyncOn = Boolean(state.overview?.autoSync?.enabled);
+    const autoSyncFeatureOn = state.overview?.features?.autoSyncEnabled !== false;
+    const autoSyncOn = autoSyncFeatureOn && Boolean(state.overview?.autoSync?.enabled);
     const tabs = [
       ["servers", t("tabServers"), serverCount, false],
       ["targets", t("tabTargets"), managedCount, false],
@@ -397,9 +726,19 @@ export async function mount(root, api) {
     managedTargets,
     openUnifiedAddModal,
     openServerEditor,
+    openCloneServerModal,
     applySingleServer,
     revertSingleServer,
     probeServer,
+    startOAuthLogin,
+    cancelOAuthLogin,
+    refreshOAuthToken,
+    logoutOAuth,
+    openOAuthConfirmModal,
+    openOAuthSyncModal,
+    applyOAuthHeaderToTargets,
+    maybeProbeUncheckedAuthHints,
+    copyOAuthLink,
     copyServerJson,
   };
 
@@ -478,6 +817,7 @@ export async function mount(root, api) {
 
   return () => {
     clearInterval(pollTimer);
+    for (const id of [...oauthPollTimers.keys()]) stopOAuthPolling(id);
     unsubLocale();
     unsubTheme();
     root.replaceChildren();

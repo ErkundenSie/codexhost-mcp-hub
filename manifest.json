@@ -5,14 +5,14 @@
     "en": "MCP Sync Hub",
     "zh-CN": "MCP 统一中心"
   },
-  "version": "2.5.3",
+  "version": "2.5.4",
   "description": {
-    "en": "Unified MCP registry and real-time multi-AI config synchronizer for Codex, Pi, Claude Code, Antigravity, Grok, Cursor, Copilot, CodeBuddy, OpenCode, and more.",
-    "zh-CN": "跨 AI 统一 MCP 管理与实时自动同步中心：支持 16 家 AI 原生配置同步、快速配置向导、同名多变体别名与实时监听自动同步。"
+    "en": "Unified MCP manager for 16+ local AIs with built-in OAuth 2.1 multi-account sign-in, auto token refresh, tool discovery, and real-time config sync.",
+    "zh-CN": "跨 16 家本机 AI 的统一 MCP 管理中心：支持内置 OAuth 2.1 多账户统一登录与后台续期、工具列表探测、同名聚合单卡与实时自动同步。"
   },
   "details": {
-    "en": "## Overview\n\n**MCP Sync Hub** gives CodexHost a unified, persistent Model Context Protocol (MCP) management console across Desktop and Web.\n\n### Key Features\n\n- **Auto-Discovery (16 Built-in AIs)**: Scans existing MCP configurations from Codex (`~/.codex/config.toml`), Pi (`~/.pi/agent/mcp.json`), Claude Code (`~/.claude.json`), Antigravity (`~/.gemini/config/mcp_config.json`), Grok (`~/.grok/config.toml`), Cursor (`~/.cursor/mcp.json`), Copilot CLI (`~/.copilot/mcp-config.json`), CodeBuddy (`~/.codebuddy/mcp.json`), Claude Desktop, OpenCode, Qwen Code, Gemini CLI, Kiro, Kimi, WorkBuddy, and Qoder.\n- **Real-Time Auto-Sync (Optional)**: Watch local AI config files and automatically sync MCP additions/updates across selected AIs — supporting Bidirectional or Primary-Source modes, existing-only vs broadcast update scope, per-MCP filtering, mass-wipe/syntax circuit breakers, and live activity logs.\n- **Quick Config & Same-Name Variants**: One-click 2-step Quick Config wizard for bulk distribution, plus multi-variant alias support when different AIs share the same MCP name with distinct configs.\n- **One-Click Import & JSON Paste**: Import all local variants as-is from detected AIs or paste standard `mcpServers` / OpenCode JSON blocks.\n- **Surgical Safe Sync**: Preserves comments, unrelated settings, built-in vendor MCPs, and unmanaged native entries. Automatically backs up every target file before writing with one-click restore.\n- **Persistent Native Configs**: Writes directly to each AI's native configuration file, so your MCP setup remains intact even when CodexHost is closed.",
-    "zh-CN": "## 功能简介\n\n**MCP 统一中心（MCP Sync Hub）** 为 CodexHost 的 Desktop 与 Web 提供跨端统一的 MCP 配置管理与多 AI 同步界面。\n\n### 核心能力\n\n- **自动扫描 16 家本机 AI**：自动识别 Codex（`~/.codex/config.toml`）、Pi（`~/.pi/agent/mcp.json`）、Claude Code（`~/.claude.json`）、Antigravity（`~/.gemini/config/mcp_config.json`）、Grok（`~/.grok/config.toml`）、Cursor（`~/.cursor/mcp.json`）、Copilot CLI（`~/.copilot/mcp-config.json`）、CodeBuddy（`~/.codebuddy/mcp.json`）、Claude Desktop、OpenCode、Qwen Code、Gemini CLI、Kiro、Kimi、WorkBuddy、Qoder 等原生 MCP 配置，并支持自定义路径与自定义目标。\n- **实时自动同步（可选开启）**：监听本机 AI 配置文件变化，支持「双向同步 / 主源同步」、修改扩散范围（「仅同步到已有该 MCP 的 AI」或「广播到全部已选 AI」）、按指定 MCP 过滤、整文件清空/语法损坏熔断保护与实时同步日志。\n- **快速配置向导 & 同名多配置别名**：支持右上角两步式「快速配置」批量下发/移除，也支持同一 MCP 名称下导入并管理多套不同配置（自动附带别名标识），互不误覆盖。\n- **一键汇总导入 & JSON 粘贴**：按本机真实配置现状一键导入，或直接粘贴标准 `mcpServers` / OpenCode JSON。\n- **安全增量同步 + 自动备份**：卡片内单条即时应用与撤销，保留原文件注释、模型设置、官方内置 MCP 与非托管条目；每次写入前自动备份并支持一键回滚。\n- **脱离 CodexHost 依然生效**：直接写入各家 AI 原生配置文件，关闭或卸载 CodexHost 后配置依然保留。"
+    "en": "## Overview\n\n**MCP Sync Hub** provides a unified, persistent Model Context Protocol (MCP) management console across CodexHost Desktop and Web.\n\n### Key Features\n\n- **Auto-Discovery (16 Built-in AIs)**: Scans and syncs native MCP configs for Codex (`~/.codex/config.toml`), Pi (`~/.pi/agent/mcp.json`), Claude Code (`~/.claude.json`), Antigravity (`~/.gemini/config/mcp_config.json`), Grok (`~/.grok/config.toml`), Cursor (`~/.cursor/mcp.json`), Copilot CLI (`~/.copilot/mcp-config.json`), CodeBuddy (`~/.codebuddy/mcp.json`), Claude Desktop, OpenCode, Qwen Code, Gemini CLI, Kiro, Kimi, WorkBuddy, and Qoder — plus custom JSON targets and raw config inspection.\n- **Built-in OAuth 2.1 & Multi-Account Isolation**: Pure-Node PKCE browser sign-in (RFC 9728 / 8414 / 7591), one-time cached 401 detection, post-login AI target sync modal, automatic background token renewal, and grouped single-card switching for multiple accounts on the same MCP URL.\n- **Real-Time Auto-Sync**: Watches local AI config files with Bidirectional or Primary-Source modes, existing-only vs broadcast update scope, per-MCP filtering, mass-wipe/syntax circuit breakers, and persistent activity logs.\n- **Connectivity & Tool Discovery**: Inspects Streamable HTTP (JSON/SSE) `tools/list` with a collapsible tool + description panel inside each card, and verifies local `stdio` executables and script paths.\n- **Surgical Safe Sync & Auto-Backups**: Preserves TOML comments, unrelated settings, Copilot `tools` allowlists, vendor built-in MCPs, and unmanaged entries. Automatically backs up every target file before writing with one-click restore.\n- **Persistent Native Configs**: Writes directly to each AI's native configuration file, remaining intact even when CodexHost is closed.",
+    "zh-CN": "## 功能简介\n\n**MCP 统一中心（MCP Sync Hub）** 为 CodexHost Desktop 与 Web 提供跨端统一的 MCP 配置管理、多账户 OAuth 授权与多 AI 实时同步界面。\n\n### 核心能力\n\n- **自动扫描 16 家本机 AI**：自动识别 Codex、Pi、Claude Code、Antigravity、Grok、Cursor、Copilot CLI、CodeBuddy、Claude Desktop、OpenCode、Qwen Code、Gemini CLI、Kiro、Kimi、WorkBuddy、Qoder 原生配置，支持原文查看、自定义路径与自定义 JSON 目标。\n- **内置 OAuth 2.1 与多账户隔离**：纯 Node 实现浏览器 PKCE 统一登录（RFC 9728 / 8414 / 7591），首次自动识别需鉴权 MCP 并持久化缓存（后续零重复请求）；支持登录后弹窗写入所选 AI、后台自动续期回写，以及同 URL 多账户聚合单卡切换。\n- **实时自动同步**：监听本机 AI 配置文件变化，支持「双向同步 / 主源单向」、修改扩散范围（「仅更新已有」或「广播全部」）、按 MCP 过滤、整文件清空/语法损坏熔断与持久化同步日志。\n- **连通测试与工具清单发现**：探测 Streamable HTTP（JSON/SSE）的 `tools/list` 并在卡片内折叠展示全部工具名与描述；支持校验 `stdio` 可执行文件及本地脚本路径。\n- **安全增量写入 + 自动备份**：保留 TOML 注释、模型设置、Copilot `tools` 白名单、官方内置 MCP 与非托管项；每次写入前自动备份并支持一键恢复。\n- **脱离 CodexHost 依然生效**：直接写入各家 AI 原生配置文件，关闭或卸载 CodexHost 后配置依然保留。"
   },
   "author": "ErkundenSie",
   "repository": "https://github.com/ErkundenSie/codexhost-mcp-hub",
@@ -27,59 +27,30 @@
   ],
   "settingsSchema": [
     {
-      "key": "autoBackup",
+      "key": "enableAutoSync",
       "type": "boolean",
       "label": {
-        "en": "Auto-Backup Before Sync",
-        "zh-CN": "同步前自动备份原配置"
+        "en": "Enable Real-Time Auto-Sync",
+        "zh-CN": "启用实时自动同步"
       },
       "description": {
-        "en": "Save a timestamped backup copy of each target config file before modifying it.",
-        "zh-CN": "每次写入各家 AI 配置文件前自动保存一份带时间戳的备份。"
+        "en": "Allow live background watching of local AI config files and automatic syncing. Turning this off pauses background watching while keeping the Auto-Sync tab and saved strategy visible.",
+        "zh-CN": "开启后允许后台实时监听本机 AI 配置文件变化并自动同步；关闭时暂停后台监听（「自动同步」标签页与已保存策略仍保留显示）。"
       },
       "default": true
     },
     {
-      "key": "excludeBuiltinMcp",
+      "key": "enableBuiltinOAuth",
       "type": "boolean",
       "label": {
-        "en": "Exclude Vendor Built-in MCPs",
-        "zh-CN": "自动排除各 AI 官方内置 MCP（如 Codex node_repl）"
+        "en": "Enable Built-in OAuth Login Button",
+        "zh-CN": "启用内置 OAuth 登录按钮"
       },
       "description": {
-        "en": "Skip AI-bundled built-in MCPs (such as Codex Desktop's node_repl) during import and protect them from accidental removal on their native AI.",
-        "zh-CN": "一键导入时自动排除各家 AI 自带的内置 MCP（如 Codex Desktop 的 node_repl），并在同步时保护其不被误删。"
+        "en": "Show a Sign in button on HTTP/SSE MCP cards that require authentication (PKCE browser flow), supporting automatic token refresh, tool discovery, and multi-account sync.",
+        "zh-CN": "开启后，对需要认证的 HTTP/SSE 远程 MCP 显示「登录」按钮，支持浏览器 PKCE 统一授权、后台自动续期、工具探测与多账户隔离。"
       },
       "default": true
-    },
-    {
-      "key": "skipLoopbackCodexhost",
-      "type": "boolean",
-      "label": {
-        "en": "Guard Against CodexHost Loopback MCP",
-        "zh-CN": "防套娃保护（跳过 CodexHost 自身回环 MCP）"
-      },
-      "description": {
-        "en": "Exclude MCP entries pointing to local CodexHost (127.0.0.1:4398/mcp) from auto-selecting all targets on import.",
-        "zh-CN": "导入时自动识别指向本机 CodexHost（127.0.0.1:4398/mcp）的 MCP，避免误同步到全部内部 AI。"
-      },
-      "default": true
-    },
-    {
-      "key": "httpProbeTimeoutMs",
-      "type": "number",
-      "label": {
-        "en": "HTTP Probe Timeout (ms)",
-        "zh-CN": "HTTP 连通测试超时（毫秒）"
-      },
-      "description": {
-        "en": "Timeout for HTTP/SSE MCP reachability checks (1000–7000 ms).",
-        "zh-CN": "测试 HTTP/SSE 类型 MCP 连通性时的超时时间（1000–7000 毫秒）。"
-      },
-      "min": 1000,
-      "max": 7000,
-      "step": 500,
-      "default": 4000
     }
   ],
   "page": {

@@ -43,6 +43,15 @@ function computeServerCardChanges(server, managed) {
   };
 }
 
+function formatExpiryTime(ts) {
+  if (!ts) return "";
+  try {
+    return new Date(ts).toLocaleString();
+  } catch {
+    return "";
+  }
+}
+
 export function renderServersTab(ctx) {
   const {
     state,
@@ -53,11 +62,19 @@ export function renderServersTab(ctx) {
     managedTargets,
     openUnifiedAddModal,
     openServerEditor,
+    openCloneServerModal,
     applySingleServer,
     revertSingleServer,
     probeServer,
+    startOAuthLogin,
+    openOAuthConfirmModal,
+    cancelOAuthLogin,
+    refreshOAuthToken,
+    logoutOAuth,
+    copyOAuthLink,
     copyServerJson,
   } = ctx;
+  const oauthFeatureOn = Boolean(state.overview?.features?.oauthEnabled);
 
   const allServers = state.overview?.servers ?? [];
   const existingIds = new Set(allServers.map((s) => s.id));
@@ -237,13 +254,43 @@ export function renderServersTab(ctx) {
       : null;
 
   const managed = managedTargets();
-  const cards = filtered.map((server) => {
+  const groupedEntries = [];
+  const groupIndexByName = new Map();
+  for (const s of filtered) {
+    const existingIdx = groupIndexByName.get(s.name);
+    if (existingIdx !== undefined) {
+      groupedEntries[existingIdx].variants.push(s);
+    } else {
+      groupIndexByName.set(s.name, groupedEntries.length);
+      groupedEntries.push({ name: s.name, variants: [s] });
+    }
+  }
+
+  const cards = groupedEntries.map(({ name: groupName, variants }) => {
+    const isGrouped = variants.length > 1;
+    const savedActiveId = state.activeVariantByName?.[groupName];
+    const server = (savedActiveId && variants.find((v) => v.id === savedActiveId)) || variants[0];
     const probe = state.probes[server.id];
     const isProbing = state.probingIds.has(server.id);
     const isApplying = state.applyingServerIds.has(server.id);
     const isChecked = state.selectedServerIds.has(server.id);
     const moreOpen = state.openMoreId === server.id;
     const changes = computeServerCardChanges(server, managed);
+    const isUrlTransport = server.transport?.type === "http" || server.transport?.type === "sse";
+    const groupHasAccountMode = Boolean(
+      oauthFeatureOn && variants.some((v) => v.transport?.type === "http" || v.transport?.type === "sse"),
+    );
+    const isAccountMode = Boolean(oauthFeatureOn && isUrlTransport);
+    const oauthState = oauthFeatureOn && isUrlTransport ? server.oauth : null;
+    const oauthPending = oauthFeatureOn && isUrlTransport ? state.oauthPendingById[server.id] : null;
+    const isOAuthStarting = oauthFeatureOn && state.oauthStartingIds.has(server.id);
+    const isOAuthBusy = oauthFeatureOn && state.oauthBusyIds.has(server.id);
+    const hintNeedsAuth = Boolean(
+      oauthFeatureOn && isUrlTransport && !oauthState?.authenticated && server.oauthAuthHint?.needsAuth,
+    );
+    const oauthNeedsLogin = Boolean(
+      oauthFeatureOn && isUrlTransport && (probe?.needsAuth || oauthState?.expired || hintNeedsAuth),
+    );
     const transportBadge =
       server.transport?.type === "stdio"
         ? t("badgeStdio")
@@ -251,9 +298,138 @@ export function renderServersTab(ctx) {
           ? t("badgeSse")
           : t("badgeHttp");
 
+    // Map each AI target owned by a sibling variant so tiles can show subtle visual distinction
+    const siblingOwnerByTarget = new Map();
+    if (isGrouped) {
+      for (const other of variants) {
+        if (other.id === server.id) continue;
+        const otherLabel = other.alias || t("variantDefaultLabel");
+        for (const tg of managed) {
+          if (other.targetStatuses?.[tg.id] === "synced" && !siblingOwnerByTarget.has(tg.id)) {
+            siblingOwnerByTarget.set(tg.id, otherLabel);
+          }
+        }
+      }
+    }
+
+    let oauthInlineEl = null;
+    if (oauthState?.authenticated && !oauthState.expired) {
+      const tip = oauthState.expiresAt
+        ? server.oauthHeaderManaged && oauthState.hasRefreshToken
+          ? t("oauthBadgeTipAutoSync", { time: formatExpiryTime(oauthState.expiresAt) })
+          : oauthState.hasRefreshToken
+            ? t("oauthBadgeTipAutoRefresh", { time: formatExpiryTime(oauthState.expiresAt) })
+            : t("oauthBadgeTipExpires", { time: formatExpiryTime(oauthState.expiresAt) })
+        : t("oauthBadgeTipValid");
+      oauthInlineEl = el("span", { className: "mh-oauth-inline is-ok", title: tip }, [
+        el("span", { className: "mh-dot is-ok" }),
+        el("span", { text: t("oauthInlineAuthed") }),
+      ]);
+    } else if (oauthFeatureOn && isUrlTransport && (isOAuthStarting || oauthPending || oauthNeedsLogin)) {
+      oauthInlineEl = el("button", {
+        className: "mh-btn mh-btn-sm mh-btn-soft",
+        disabled: isOAuthStarting || Boolean(oauthPending),
+        text: isOAuthStarting
+          ? t("oauthBtnStarting")
+          : oauthPending
+            ? t("oauthBtnWaiting")
+            : t("oauthBtnLogin"),
+        onClick: () => openOAuthConfirmModal(server),
+      });
+    }
+
+    let variantStripEl = null;
+    if (isGrouped) {
+      const activeLabel = server.alias || t("variantDefaultLabel");
+      const activeSyncedNames = changes.synced.map((x) => x.shortName || x.name);
+      const summaryText =
+        activeSyncedNames.length > 0
+          ? t("variantViewingSummary", {
+              alias: activeLabel,
+              ais:
+                activeSyncedNames.slice(0, 3).join("、") +
+                (activeSyncedNames.length > 3 ? ` +${activeSyncedNames.length - 3}` : ""),
+            })
+          : t("variantViewingNone", { alias: activeLabel });
+
+      variantStripEl = el("div", { className: "mh-variant-strip" }, [
+        el("div", { className: "mh-variant-tabs", role: "tablist" }, [
+          ...variants.map((v) => {
+            const vActive = v.id === server.id;
+            const vLabel = v.alias || t("variantDefaultLabel");
+            const vChanges = computeServerCardChanges(v, managed);
+            const vIsUrl = v.transport?.type === "http" || v.transport?.type === "sse";
+            const vOAuth = oauthFeatureOn && vIsUrl ? v.oauth : null;
+            const vProbe = state.probes[v.id];
+            let dotCls = null;
+            if (oauthFeatureOn && vIsUrl) {
+              if (vOAuth?.authenticated && !vOAuth.expired) dotCls = "is-ok";
+              else if (vOAuth?.expired || vProbe?.needsAuth || v.oauthAuthHint?.needsAuth) dotCls = "is-warn";
+              else dotCls = "is-off";
+            }
+            return el(
+              "button",
+              {
+                className: `mh-variant-tab ${vActive ? "is-active" : ""}`,
+                role: "tab",
+                "aria-selected": String(vActive),
+                onClick: () => {
+                  state.activeVariantByName[groupName] = v.id;
+                  state.openMoreId = null;
+                  render();
+                },
+              },
+              [
+                dotCls ? el("span", { className: `mh-dot ${dotCls}` }) : null,
+                el("span", { text: vLabel }),
+                vChanges.hasChanges ? el("span", { className: "mh-variant-pending-dot" }) : null,
+              ],
+            );
+          }),
+          el("button", {
+            className: "mh-variant-tab is-add",
+            text: groupHasAccountMode ? t("variantAddAccountBtn") : t("variantAddConfigBtn"),
+            onClick: () => openCloneServerModal(server),
+          }),
+        ]),
+        el("span", { className: "mh-variant-meta", title: summaryText, text: summaryText }),
+      ]);
+    }
+
+    let oauthWaitEl = null;
+    if (oauthPending && oauthPending.status === "pending") {
+      const remainingSec = Math.max(0, Math.ceil((oauthPending.expiresAt - Date.now()) / 1000));
+      oauthWaitEl = el("div", { className: "mh-oauth-wait-bar" }, [
+        el("span", {
+          className: "mh-oauth-wait-text",
+          text: t("oauthWaitTitle", { sec: remainingSec }),
+        }),
+        el("div", { className: "mh-actions" }, [
+          el("a", {
+            className: "mh-btn mh-btn-sm mh-btn-soft",
+            href: oauthPending.authUrl,
+            target: "_blank",
+            rel: "noopener noreferrer",
+            text: t("oauthWaitReopen"),
+          }),
+          el("button", {
+            className: "mh-btn mh-btn-sm",
+            text: t("oauthWaitCopy"),
+            onClick: () => copyOAuthLink(oauthPending.authUrl),
+          }),
+          el("button", {
+            className: "mh-btn mh-btn-sm",
+            text: t("btnCancel"),
+            onClick: () => cancelOAuthLogin(server),
+          }),
+        ]),
+      ]);
+    }
+
     let probeEl = null;
     if (probe) {
       const hasTools = typeof probe.toolCount === "number";
+      const isAuthWarn = Boolean(probe.ok && probe.needsAuth);
       let text;
       if (probe.kind === "stdio") {
         text = probe.ok
@@ -263,12 +439,15 @@ export function renderServersTab(ctx) {
               ? t("probeStdioWarn", { detail: probe.detail })
               : t("probeStdioOk", { detail: probe.detail })
           : t("probeFail", { error: probe.error });
-      } else if (probe.ok && probe.needsAuth) {
+      } else if (isAuthWarn) {
         text = t("probeAuth", { status: probe.status });
       } else if (probe.ok) {
         text = hasTools
           ? t("probeOkTools", { status: probe.status, count: probe.toolCount })
           : t("probeOk", { status: probe.status });
+        if (probe.usedOAuth) {
+          text += t("probeUsedOAuthSuffix");
+        }
       } else {
         text = t("probeFail", { error: probe.error });
       }
@@ -278,9 +457,13 @@ export function renderServersTab(ctx) {
         !toolsExpanded && hasTools && Array.isArray(probe.toolNames) && probe.toolNames.length > 0
           ? `${probe.toolNames.join(", ")}${probe.toolCount > probe.toolNames.length ? " …" : ""}`
           : "";
-      probeEl = el("div", { className: `mh-probe-bar ${probe.ok ? "is-ok" : "is-err"}` }, [
+      const barTone = isAuthWarn ? "is-auth" : probe.ok ? "is-ok" : "is-err";
+      probeEl = el("div", { className: `mh-probe-bar ${barTone}` }, [
         el("div", { className: "mh-probe-head" }, [
           el("span", { text }),
+          isAuthWarn && isUrlTransport && !oauthFeatureOn
+            ? el("span", { className: "mh-probe-hint", text: t("probeAuthEnableHint") })
+            : null,
           toolsList.length > 0
             ? el("button", {
                 className: "mh-btn-link",
@@ -316,6 +499,9 @@ export function renderServersTab(ctx) {
     }
 
     const statParts = [t("cardStatSynced", { count: changes.synced.length })];
+    if (isGrouped && siblingOwnerByTarget.size > 0) {
+      statParts.push(t("cardStatSiblingUsed", { count: siblingOwnerByTarget.size }));
+    }
     if (changes.adds.length) statParts.push(t("cardStatAdd", { count: changes.adds.length }));
     if (changes.overwrites.length) statParts.push(t("cardStatOverwrite", { count: changes.overwrites.length }));
     if (changes.removes.length) statParts.push(t("cardStatRemove", { count: changes.removes.length }));
@@ -377,7 +563,7 @@ export function renderServersTab(ctx) {
     return el(
       "div",
       {
-        className: `mh-card ${server.enabled ? "" : "is-disabled"} ${isChecked ? "is-checked" : ""} ${changes.hasChanges ? "has-apply-bar" : ""}`,
+        className: `mh-card ${server.enabled ? "" : "is-disabled"} ${isChecked ? "is-checked" : ""} ${changes.hasChanges ? "has-apply-bar" : ""} ${isGrouped ? "has-variant-strip" : ""}`,
       },
       [
         el("div", { className: "mh-card-top" }, [
@@ -396,11 +582,21 @@ export function renderServersTab(ctx) {
             el("div", { className: "mh-card-title-col" }, [
               el("div", { className: "mh-card-name-row" }, [
                 el("span", { className: "mh-card-name", text: server.name }),
-                server.alias ? el("span", { className: "mh-tag mh-tag-alias", text: server.alias }) : null,
+                !isGrouped && server.alias
+                  ? el("span", { className: "mh-tag mh-tag-alias", text: server.alias })
+                  : null,
                 el("span", {
-                  className: `mh-tag ${server.transport?.type === "stdio" ? "mh-tag-mono" : "mh-tag-accent mh-tag-mono-font"}`,
+                  className: "mh-tag mh-tag-mono",
                   text: transportBadge,
                 }),
+                isGrouped
+                  ? el("span", {
+                      className: "mh-tag-count-pill",
+                      text: groupHasAccountMode
+                        ? t("variantAccountCountBadge", { count: variants.length })
+                        : t("variantConfigCountBadge", { count: variants.length }),
+                    })
+                  : null,
                 !server.enabled ? el("span", { className: "mh-tag", text: t("badgeDisabled") }) : null,
                 server.isLoopback
                   ? el("span", {
@@ -420,9 +616,10 @@ export function renderServersTab(ctx) {
             ]),
           ]),
           el("div", { className: "mh-card-actions" }, [
+            oauthInlineEl,
             el("button", {
               className: "mh-btn mh-btn-sm",
-              disabled: isProbing,
+              disabled: isProbing || Boolean(oauthPending),
               text: isProbing ? t("btnTesting") : t("btnTest"),
               onClick: () => probeServer(server),
             }),
@@ -443,6 +640,69 @@ export function renderServersTab(ctx) {
               }),
               moreOpen
                 ? el("div", { className: "mh-more-menu" }, [
+                    ...(oauthFeatureOn && isUrlTransport
+                      ? [
+                          ...(oauthState?.authenticated
+                            ? [
+                                oauthState.hasRefreshToken
+                                  ? el("button", {
+                                      className: "mh-more-item",
+                                      disabled: isOAuthBusy,
+                                      text: t("oauthMenuRefresh"),
+                                      onClick: () => {
+                                        state.openMoreId = null;
+                                        void refreshOAuthToken(server);
+                                        render();
+                                      },
+                                    })
+                                  : null,
+                                oauthState.expired
+                                  ? el("button", {
+                                      className: "mh-more-item",
+                                      disabled: isOAuthStarting || Boolean(oauthPending),
+                                      text: t("oauthMenuRelogin"),
+                                      onClick: () => {
+                                        state.openMoreId = null;
+                                        openOAuthConfirmModal(server);
+                                      },
+                                    })
+                                  : null,
+                                el("button", {
+                                  className: "mh-more-item",
+                                  disabled: isOAuthBusy,
+                                  text: t("oauthMenuLogout"),
+                                  onClick: () => {
+                                    state.openMoreId = null;
+                                    void logoutOAuth(server);
+                                    render();
+                                  },
+                                }),
+                                el("div", { className: "mh-more-sep" }),
+                              ]
+                            : !oauthNeedsLogin && !oauthPending && !isOAuthStarting
+                              ? [
+                                  el("button", {
+                                    className: "mh-more-item is-accent",
+                                    disabled: isOAuthStarting || Boolean(oauthPending),
+                                    text: t("oauthMenuLogin"),
+                                    onClick: () => {
+                                      state.openMoreId = null;
+                                      openOAuthConfirmModal(server);
+                                    },
+                                  }),
+                                  el("div", { className: "mh-more-sep" }),
+                                ]
+                              : []),
+                        ]
+                      : []),
+                    el("button", {
+                      className: "mh-more-item",
+                      text: isAccountMode ? t("btnCloneAccount") : t("btnCloneConfig"),
+                      onClick: () => {
+                        state.openMoreId = null;
+                        openCloneServerModal(server);
+                      },
+                    }),
                     el("button", {
                       className: "mh-more-item",
                       text: t("btnCopyJson"),
@@ -482,6 +742,8 @@ export function renderServersTab(ctx) {
             ]),
           ]),
         ]),
+        variantStripEl,
+        oauthWaitEl,
         probeEl,
         el("div", { className: "mh-card-ai-panel" }, [
           el("div", { className: "mh-ai-panel-head" }, [
@@ -527,6 +789,7 @@ export function renderServersTab(ctx) {
             managed.map((tg) => {
               const selected = server.enabled && (server.targets ?? []).includes(tg.id);
               const status = server.targetStatuses?.[tg.id] || (selected ? "pending-add" : "off");
+              const siblingOwner = status === "off" ? siblingOwnerByTarget.get(tg.id) : null;
               const cls =
                 status === "synced"
                   ? "is-synced"
@@ -536,7 +799,9 @@ export function renderServersTab(ctx) {
                       ? "is-pending-update"
                       : status === "pending-remove"
                         ? "is-pending-remove"
-                        : "";
+                        : siblingOwner
+                          ? "is-sibling-owned"
+                          : "";
               const mark =
                 status === "synced"
                   ? "✓"
@@ -551,6 +816,7 @@ export function renderServersTab(ctx) {
                 "button",
                 {
                   className: `mh-ai-tile ${cls}`,
+                  title: siblingOwner ? t("variantSiblingTileTip", { owner: siblingOwner }) : undefined,
                   onClick: async () => {
                     let next;
                     if (!server.enabled) {

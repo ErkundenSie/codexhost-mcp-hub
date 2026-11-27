@@ -12,7 +12,7 @@ const MAX_TOOL_DESC_LEN = 240;
 const INIT_PARAMS = {
   protocolVersion: "2024-11-05",
   capabilities: {},
-  clientInfo: { name: "codexhost-mcp-hub", version: "2.5.3" },
+  clientInfo: { name: "codexhost-mcp-hub", version: "2.5.4" },
 };
 
 function isLocalAbsolutePath(value) {
@@ -81,7 +81,7 @@ function extractToolsInfo(messages) {
  *  - For `stdio`: validates command structure, checks executable existence if an absolute path is given,
  *    and verifies any referenced local absolute script/config file paths in `args`.
  */
-export async function probeMcpServer(server, timeoutMs = 4000) {
+export async function probeMcpServer(server, timeoutMs = 4000, extraHeaders = null) {
   const t = server?.transport;
   if (!t || typeof t !== "object") {
     return { ok: false, kind: "invalid", error: "Missing transport configuration" };
@@ -146,6 +146,7 @@ export async function probeMcpServer(server, timeoutMs = 4000) {
     const headers = {
       "Content-Type": "application/json",
       Accept: "application/json, text/event-stream",
+      ...(extraHeaders && typeof extraHeaders === "object" ? extraHeaders : {}),
       ...(t.headers ?? {}),
     };
     const initPayload = JSON.stringify({

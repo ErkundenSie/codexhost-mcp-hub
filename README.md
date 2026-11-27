@@ -1,107 +1,162 @@
-# MCP Hub — CodexHost 统一 MCP 中心（`manifestVersion: 2`）
+<div align="center">
+  <img src="assets/icon.png" alt="MCP Sync Hub" width="80" height="80" />
+  <h1>MCP Sync Hub（MCP 统一中心）</h1>
+  <p>
+    <strong>为 CodexHost Desktop &amp; Web 打造的跨 AI 统一 MCP 管理、多账户 OAuth 授权与实时配置同步中心</strong>
+  </p>
+  <p>
+    <a href="https://github.com/ErkundenSie/codexhost-mcp-hub/releases/latest">
+      <img src="https://img.shields.io/github/v/release/ErkundenSie/codexhost-mcp-hub?style=flat-square&color=2563eb&label=release" alt="Latest Release" />
+    </a>
+    <img src="https://img.shields.io/badge/CodexHost-Extension%20v2-0f172a?style=flat-square" alt="CodexHost Extension v2" />
+    <img src="https://img.shields.io/badge/Dependencies-Zero-15803d?style=flat-square" alt="Zero Dependencies" />
+    <a href="LICENSE">
+      <img src="https://img.shields.io/github/license/ErkundenSie/codexhost-mcp-hub?style=flat-square" alt="License" />
+    </a>
+  </p>
+</div>
 
-在 CodexHost 的 **Desktop** 与 **Web** 之间提供一个跨端统一的 MCP（Model Context Protocol）管理与多 AI 配置同步插件：一次配置 MCP，一键安全同步到本机各家 AI 的原生配置文件中。即使后续关闭或卸载 CodexHost，各家 AI 的 MCP 配置依然完整保留。
+---
 
-## 界面预览
+**MCP Sync Hub** 让你在一个界面里集中管理本机所有 AI 客户端的 **Model Context Protocol (MCP)** 配置：支持自动扫描 16 家 AI 原生配置、内置 OAuth 2.1 浏览器统一登录与多账户隔离、实时文件监听自动同步、HTTP/SSE 工具列表发现以及安全增量写入与自动备份。
 
-![MCP 统一中心界面预览](assets/preview.png)
+> **原生持久化**：所有变更直接写入各家 AI 自己的原生配置文件（`.toml` / `.json`）。即使关闭或卸载 CodexHost，你的 MCP 配置依然完整生效。
 
-## 核心功能
+![MCP Sync Hub 界面预览](assets/preview.png)
 
-- **自动扫描 16 家本机 AI**：自动检测并读取 Codex、Pi、Claude Code、Antigravity (`agy`)、Grok、Cursor / Cursor CLI、GitHub Copilot CLI、CodeBuddy、Claude Desktop、OpenCode、Qwen Code、Gemini CLI、Kiro CLI、Kimi Code、WorkBuddy、Qoder 等原生 MCP 配置，并支持自定义路径与自定义 JSON 目标。
-- **实时自动同步（可选）**：监听本机 AI 配置文件变化，支持「双向同步 / 主源同步」、「仅同步到已有该 MCP 的 AI / 广播到全部已选 AI」、按指定 MCP 过滤、整文件清空/语法损坏熔断保护与实时同步日志。
-- **快速配置向导 & 卡片单条应用**：
-  - 顶部「快速配置」两步向导：默认全选 MCP → 选择目标 AI 与覆盖保护 → 一键批量添加或移除；
-  - 单条 MCP 卡片内直接勾选/取消各家 AI，卡片底部「撤销 / 应用」即时写入该条 MCP，互不干扰。
-- **同名多配置别名支持**：如果不同 AI 存在同名但配置不同的 MCP，导入时会全部展示并自动附带来源别名（如 `Codex` / `Pi`），分别托管互不误覆盖。
-- **一键汇总导入 & JSON 粘贴**：从本机已检测 AI 按真实配置现状一键导入，或直接粘贴标准 `mcpServers` / OpenCode JSON。
-- **安全增量同步 + 自动备份恢复**：
-  - Codex / Grok TOML 采用局部段落级更新，保留原文件注释、模型与其他配置；
-  - 自动排除并保护官方内置 MCP（如 Codex Desktop 的 `node_repl`），不误删各 AI 里手工维护的非托管项；
-  - 每次写入前自动备份原配置文件（最多保留 40 份），支持在「项目与备份」页一键恢复。
-- **防套娃保护**：自动识别指向本机 CodexHost（`127.0.0.1:4398/mcp`）的回环 MCP，避免误同步到全部内部 AI。
-- **项目级配置同步**：支持按项目目录扫描或写入 `.mcp.json`、`.cursor/mcp.json`、`.codex/config.toml`、`opencode.json`。
-- **HTTP / SSE 连通性测试**：快速探测远程 MCP 端点可达性与鉴权状态。
+## ✨ 核心特性
 
-## 目录结构
+- **🔍 自动扫描 16 家本机 AI**
+  自动识别已安装的 AI 客户端配置文件（兼容 TOML、Standard JSON、Antigravity JSON、Copilot JSON、OpenCode JSON），支持查看原始配置文件、自定义路径与添加自定义 JSON 目标。
+- **🔐 内置 MCP OAuth 2.1 授权与多账户隔离**
+  - 纯 Node 原生实现 RFC 9728 / RFC 8414 / RFC 7591 动态注册与 PKCE S256 浏览器授权；
+  - 首次导入/加载时自动识别需要鉴权（HTTP 401）的远程 MCP 并持久化缓存，后续打开零重复网络请求；
+  - 登录成功后弹窗选择要写入的 AI，或保留为「仅在本页使用」；支持**后台自动续期**并静默回写到已同步的 AI；
+  - 支持同一 MCP URL 下的**同名多账户聚合单卡**（例如 AI A 用账号 A、AI B/C 用账号 B、AI D 走原生登录），各账户令牌与续期完全隔离。
+- **🔄 实时文件监听自动同步**
+  监听本机 AI 配置文件保存事件（750ms 防抖 + 自写回环抑制），支持 **双向同步 / 主源单向**、**仅更新已有该 MCP / 广播到全部已选 AI**、按指定 MCP 过滤、语法损坏与整文件清空熔断保护，以及持久化同步日志。
+- **🧪 连通性探测与工具列表发现**
+  - **Streamable HTTP（JSON / SSE）**：握手探测并拉取 `tools/list`，在卡片内可折叠查看全部工具名与说明；
+  - **stdio**：校验本地可执行文件与参数中引用的本地脚本路径。
+- **⚡ 快速配置向导 & 卡片即时应用**
+  支持顶部两步式「快速配置」批量下发/移除（带同名不同配置覆盖保护），也支持单卡片内即时勾选、撤销与一键应用。
+- **🛡️ 安全增量写入 + 自动备份回滚**
+  - Codex / Grok TOML 采用段落级局部更新，保留原文件注释与模型设置；Copilot CLI 自动保留已有的 `tools` 白名单；
+  - 自动排除并保护官方内置 MCP（如 Codex `node_repl`）与指向本机 CodexHost（`127.0.0.1:4398/mcp`）的回环 MCP；
+  - 每次写入前自动保存带时间戳的原文件备份（最多保留 40 份），支持随时一键恢复。
+- **📁 项目级 MCP 同步**
+  一键扫描并写入项目目录内的 `.mcp.json`、`.cursor/mcp.json`、`.codex/config.toml`、`opencode.json`。
+
+## 🤖 支持的 AI 客户端
+
+除以下 16 家内置客户端外，还支持在 **AI 配置** 页添加任意自定义 JSON 目标：
+
+| AI 客户端 | 配置格式 | 默认配置文件路径 |
+| --- | --- | --- |
+| **Codex** | `codex-toml` (`mcp_servers`) | `~/.codex/config.toml` |
+| **Grok** | `codex-toml` (`mcp_servers`) | `~/.grok/config.toml` |
+| **Pi** | `standard-json` (`mcpServers`) | `~/.pi/agent/mcp.json` |
+| **Claude Code** | `standard-json` (`mcpServers`) | `~/.claude.json` |
+| **Claude Desktop** | `standard-json` (`mcpServers`) | Windows: `%APPDATA%\Claude\claude_desktop_config.json`<br/>macOS: `~/Library/Application Support/Claude/claude_desktop_config.json`<br/>Linux: `~/.config/Claude/claude_desktop_config.json` |
+| **Antigravity (`agy`)** | `antigravity-json` (`mcpServers`) | `~/.gemini/config/mcp_config.json` |
+| **Cursor / Cursor CLI** | `standard-json` (`mcpServers`) | `~/.cursor/mcp.json` |
+| **GitHub Copilot CLI** | `copilot-json` (`mcpServers`) | `~/.copilot/mcp-config.json` |
+| **CodeBuddy** | `standard-json` (`mcpServers`) | `~/.codebuddy/mcp.json` |
+| **OpenCode** | `opencode-json` (`mcp`) | `~/.config/opencode/opencode.json` |
+| **Qwen Code** | `standard-json` (`mcpServers`) | `~/.qwen/settings.json` |
+| **Gemini CLI** | `standard-json` (`mcpServers`) | `~/.gemini/settings.json` |
+| **Kiro CLI** | `standard-json` (`mcpServers`) | `~/.kiro/settings/mcp.json` |
+| **Kimi Code** | `standard-json` (`mcpServers`) | `~/.kimi/mcp.json` |
+| **WorkBuddy** | `standard-json` (`mcpServers`) | `~/.workbuddy/mcp.json` |
+| **Qoder** | `standard-json` (`mcpServers`) | `~/.qoder-cn/mcp.json` |
+
+## 🚀 安装方式
+
+### 方式一：CodexHost 插件市场一键安装（推荐）
+
+本插件已上架 CodexHost 官方扩展市场：
+1. 打开 CodexHost Desktop 或 Web，进入 **插件中心 → 市场**；
+2. 搜索 **`MCP 统一中心`** 或 **`MCP Sync Hub`**，点击安装并启用。
+
+### 方式二：通过 GitHub 仓库导入
+
+1. 在 CodexHost **插件中心** 点击右上角 **导入插件 → GitHub**；
+2. 填入仓库地址：`ErkundenSie/codexhost-mcp-hub`（其余可选项留空，自动拉取最新 Release）；
+3. 安装完成后启用即可使用。
+
+### 方式三：本地 `.zip` 包导入
+
+1. 从 [Releases](https://github.com/ErkundenSie/codexhost-mcp-hub/releases/latest) 下载最新的 `mcp-sync-hub-*.zip`；
+2. 在 CodexHost **插件中心** 点击 **导入插件 → 本地 .zip** 上传安装。
+
+## ⚙️ 插件设置
+
+在 CodexHost **插件中心 → MCP 统一中心 → 插件设置** 中可随时调整：
+
+| 设置项 | 默认值 | 说明 |
+| --- | --- | --- |
+| **启用实时自动同步** (`enableAutoSync`) | `开启` | 允许后台监听本机 AI 配置文件变化并按策略自动同步；关闭时暂停后台监听，「自动同步」标签页与历史配置仍保留显示。 |
+| **启用内置 OAuth 登录按钮** (`enableBuiltinOAuth`) | `开启` | 为需要认证的 HTTP/SSE 远程 MCP 显示「登录」按钮，支持浏览器 PKCE 统一授权、后台自动续期、工具探测与多账户隔离。 |
+
+> 自动备份（写入前备份）、官方内置 MCP 保护、CodexHost 回环防套娃保护以及 4000ms 探测超时均已在后台默认启用，无需繁琐配置。
+
+## 🔒 安全与隐私设计
+
+- **零外部依赖 & 零子进程**：全部使用 Node.js 原生内置模块，不调用 `child_process`、`eval` 或 `new Function`，完整通过插件市场静态安全扫描。
+- **令牌私有隔离**：OAuth 令牌按卡片 ID 独立存储在插件私有目录 `oauth-tokens.json`（POSIX 权限 `0600`），原始 `access_token` / `refresh_token` 绝不通过 `overview` 接口暴露给前端。
+- **原子写入与熔断保护**：全部文件写入采用临时文件原子替换（`atomicWriteText`）；自动同步内置「整文件清空熔断」与「语法错误熔断」，防止误操作扩散。
+
+## 🛠️ 本地开发与测试
+
+需要 Node.js 20+（无需 `npm install`，零外部依赖）：
+
+```bash
+# 运行全部自动化测试（21 项用例，含 ZIP CRC、TOML 局部更新、Auto-Sync、OAuth 2.1 PKCE 多账户隔离）
+node --test test/hub.test.mjs
+
+# 打包为 CodexHost 可导入的 .zip（输出至 dist/mcp-sync-hub-<version>.zip）
+node scripts/pack.mjs
+```
+
+<details>
+<summary>📂 目录结构</summary>
 
 ```text
 codexhost-mcp-hub/
-├── manifest.json                 # manifestVersion: 2 插件清单
+├── manifest.json                 # CodexHost manifestVersion: 2 插件清单
 ├── assets/
 │   ├── icon.png                  # 插件图标 (256x256 PNG)
-│   └── preview.png               # 插件预览图 (960x540 PNG)
+│   └── preview.png               # 界面预览图
 ├── shared/
-│   ├── i18n.mjs                  # 中英文文案
-│   └── models.mjs                # MCP 规范化、JSON 导入解析、内置识别与指纹对比
+│   ├── i18n.mjs                  # 中英文 1:1 双语字典
+│   └── models.mjs                # MCP 规范化、JSON 解析、内置/回环识别与指纹对比
 ├── page/
-│   ├── index.mjs                 # Desktop + Web 配置页入口 (mount)
-│   ├── dom.mjs                   # 通用 DOM 构建与格式化辅助函数
-│   ├── modals.mjs                # 快速配置、添加/编辑 MCP 与确认弹窗
+│   ├── index.mjs                 # Desktop + Web 页面入口 (mount) 与状态协调
+│   ├── dom.mjs                   # 轻量 DOM/SVG 构建工具
+│   ├── modals.mjs                # 快速配置、添加/编辑/多账户、OAuth 确认与写入弹窗
 │   ├── tabs/
-│   │   ├── servers.mjs           # MCP 列表标签页
-│   │   ├── targets.mjs           # AI 配置标签页
-│   │   ├── autosync.mjs          # 实时自动同步标签页
-│   │   └── project-backups.mjs   # 项目与备份标签页
-│   └── style.css                 # 使用 --cx-page-* 主题变量（支持浅/深色）
+│   │   ├── servers.mjs           # MCP 列表（同名多账户聚合单卡 + 折叠工具面板）
+│   │   ├── targets.mjs           # AI 配置（自动检测 + 原文查看 + 自定义路径/目标）
+│   │   ├── autosync.mjs          # 实时自动同步策略与持久化日志
+│   │   └── project-backups.mjs   # 项目级配置同步与自动备份恢复
+│   └── style.css                 # 主题适配样式（自动跟随浅色 / 深色模式）
 ├── backend/
-│   ├── index.mjs                 # 共享 Host 单实例 Node 后端入口 (activate)
-│   ├── adapters.mjs              # 16 家内置 AI + 自定义目标 + 项目级适配器
+│   ├── index.mjs                 # 单实例 Node 后端入口 (activate) 与全部 RPC
+│   ├── adapters.mjs              # 16 家内置 AI + 自定义目标 + 项目级格式适配器
+│   ├── oauth.mjs                 # 纯 Node MCP OAuth 2.1（PKCE + 自动续期 + 多账户隔离）
+│   ├── probe.mjs                 # Streamable HTTP (JSON/SSE) 工具发现与 stdio 路径探测
 │   ├── watcher.mjs               # 父目录级 fs.watch 防抖监听与自写抑制器
 │   ├── toml.mjs                  # Codex / Grok TOML 注释保留型局部更新器
-│   ├── store.mjs                 # 中心库持久化与自动备份管理
-│   └── probe.mjs                 # HTTP/SSE 连通性测试与 stdio 校验
+│   └── store.mjs                 # 中心库持久化、authHints 缓存、日志与备份管理
 ├── scripts/
-│   ├── generate-assets.mjs       # 纯 Node PNG 图标与预览图生成脚本
-│   └── pack.mjs                  # 纯 Node 打包脚本（输出 dist/mcp-hub-<version>.zip）
+│   ├── generate-assets.mjs       # 纯 Node PNG 资源生成脚本
+│   └── pack.mjs                  # 纯 Node ZIP 打包器（CRC32 + Deflate）
 └── test/
-    └── hub.test.mjs              # 自动化单元测试
+    └── hub.test.mjs              # 完整单元测试与端到端回归测试套件
 ```
 
-## 构建与打包
+</details>
 
-本插件**零外部运行时依赖**（全部使用标准 ESM 与 Node 内置模块）：
+## 📄 License
 
-```bash
-# 重新生成图标与预览图（可选）
-node scripts/generate-assets.mjs
-
-# 打包为 .zip（输出至 dist/mcp-hub-<version>.zip）
-node scripts/pack.mjs
-
-# 运行自动化测试（含 ZIP 结构与 CRC 校验）
-node --test test/hub.test.mjs
-```
-
-## 安装与更新
-
-### 方式一：通过 GitHub 链接直接安装（推荐）
-
-1. 打开 CodexHost Desktop（**设置 → 插件**）或 CodexHost Web（左侧导航 **插件**）；
-2. 点击右上角 **导入插件** → 切换到 **GitHub** 标签页；
-3. 在 **GitHub 仓库** 中填入：
-   ```text
-   ErkundenSie/codexhost-mcp-hub
-   ```
-   （或完整链接 `https://github.com/ErkundenSie/codexhost-mcp-hub`）
-4. 其余可选项全部**留空**即可（默认自动拉取最新 Release 的 `.zip` 资产），点击 **安装**；
-5. 安装完成后启用 **「MCP 统一中心」**，即可从顶部标签栏或「插件页面」进入配置页。
-
-### 方式二：下载 Release `.zip` 本地导入
-
-1. 前往 [Releases](https://github.com/ErkundenSie/codexhost-mcp-hub/releases/latest) 下载最新的 `mcp-sync-hub-*.zip`；
-2. 在 CodexHost「插件中心」点击 **导入插件 → 本地 .zip** 上传安装并启用。
-
-> 若已安装旧版插件，直接通过「导入插件」重新导入时请先卸载旧版，或在已安装插件详情页进行更新。
-
-## 发布新版本
-
-仓库已配置 GitHub Actions 自动发版工作流（`.github/workflows/release.yml`）：
-
-1. 更新 `manifest.json` 中的 `version` 并提交到 `main`；
-2. 推送对应版本标签：
-   ```bash
-   git tag -a v2.x.x -m "MCP Hub v2.x.x"
-   git push origin main --tags
-   ```
-3. GitHub Actions 会自动打包 `.zip`、运行单元测试并发布对应 Release。
+[MIT](LICENSE)

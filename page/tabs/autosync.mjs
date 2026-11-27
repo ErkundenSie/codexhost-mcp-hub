@@ -91,11 +91,14 @@ export function renderAutoSyncTab(ctx) {
     }
   }
 
-  const statusText = !cfg.enabled
-    ? t("autoSyncStatusOff")
-    : cfg.mcpScope === "selected"
-      ? t("autoSyncStatusOnScoped", { mcps: selectedMcpSet.size, count: selectedTargetSet.size })
-      : t("autoSyncStatusOn", { count: selectedTargetSet.size });
+  const featureDisabledBySetting = state.overview?.features?.autoSyncEnabled === false;
+  const statusText = featureDisabledBySetting
+    ? t("autoSyncStatusDisabledBySetting")
+    : !cfg.enabled
+      ? t("autoSyncStatusOff")
+      : cfg.mcpScope === "selected"
+        ? t("autoSyncStatusOnScoped", { mcps: selectedMcpSet.size, count: selectedTargetSet.size })
+        : t("autoSyncStatusOn", { count: selectedTargetSet.size });
 
   const modeSummary =
     cfg.mode === "primary"
@@ -121,17 +124,23 @@ export function renderAutoSyncTab(ctx) {
               el("span", { text: statusText }),
             ]),
           ]),
-          el("p", { className: "mh-as-hero-desc", text: t("autoSyncPanelDesc") }),
+          el("p", {
+            className: "mh-as-hero-desc",
+            text: featureDisabledBySetting ? t("autoSyncDisabledBySettingDesc") : t("autoSyncPanelDesc"),
+          }),
         ]),
       ]),
       el(
         "button",
         {
-          className: `mh-toggle-btn mh-toggle-lg ${cfg.enabled ? "is-on" : ""}`,
+          className: `mh-toggle-btn mh-toggle-lg ${cfg.enabled && !featureDisabledBySetting ? "is-on" : ""}`,
           role: "switch",
-          "aria-checked": String(Boolean(cfg.enabled)),
+          disabled: featureDisabledBySetting,
+          "aria-checked": String(Boolean(cfg.enabled && !featureDisabledBySetting)),
           "aria-label": t("autoSyncPanelTitle"),
-          onClick: () => patchConfig({ enabled: !cfg.enabled }),
+          onClick: () => {
+            if (!featureDisabledBySetting) void patchConfig({ enabled: !cfg.enabled });
+          },
         },
         [el("span", { className: "mh-toggle-thumb" })],
       ),

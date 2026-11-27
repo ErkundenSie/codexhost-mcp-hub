@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import http from "node:http";
 import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
@@ -970,10 +971,10 @@ test("v2.4.0 auto-sync: existing-only scope, selected MCP filter, primary mode, 
 
   const hub = createHubController({
     dataDir,
-    readSettings: async () => ({ autoBackup: true, excludeBuiltinMcp: true }),
+    readSettings: async () => ({ autoBackup: true, excludeBuiltinMcp: true, enableAutoSync: true }),
     home: fakeHome,
     platform: "win32",
-    watchDebounceMs: 80,
+    watchDebounceMs: 5000,
   });
 
   try {
@@ -1198,7 +1199,7 @@ test("auto-sync advanced branches & regressions: single removal, broadcast scope
 
   const hub = createHubController({
     dataDir,
-    readSettings: async () => ({ autoBackup: true, excludeBuiltinMcp: true }),
+    readSettings: async () => ({ autoBackup: true, excludeBuiltinMcp: true, enableAutoSync: true }),
     home: fakeHome,
     platform: "win32",
     watchDebounceMs: 5000,
@@ -1306,16 +1307,20 @@ test("i18n dictionaries have 1:1 zh-CN/en key parity and all frontend t() calls 
     "page/tabs/project-backups.mjs",
   ];
   const unknownKeys = [];
+  const referencedKeys = new Set();
   for (const rel of pageFiles) {
     const src = await readFile(path.join(rootDir, rel), "utf8");
     for (const m of src.matchAll(/\bt\(\s*["']([a-zA-Z0-9_]+)["']/g)) {
       const key = m[1];
+      referencedKeys.add(key);
       if (!zhKeys.has(key) || !enKeys.has(key)) {
         unknownKeys.push(`${rel}: ${key}`);
       }
     }
   }
   assert.deepEqual(unknownKeys, [], `Undefined i18n keys referenced in page/: ${unknownKeys.join(", ")}`);
+  const unusedKeys = [...zhKeys].filter((k) => !referencedKeys.has(k));
+  assert.deepEqual(unusedKeys, [], `Unused dead i18n keys left in shared/i18n.mjs: ${unusedKeys.join(", ")}`);
 });
 
 test("v2.5.0: copilot-json format (type:local + tools preservation), persistent auto-sync logs, target raw viewer, and stdio arg path probe", async () => {
@@ -1354,7 +1359,7 @@ test("v2.5.0: copilot-json format (type:local + tools preservation), persistent 
 
   const hub1 = createHubController({
     dataDir,
-    readSettings: async () => ({ autoBackup: false, excludeBuiltinMcp: true }),
+    readSettings: async () => ({ autoBackup: false, excludeBuiltinMcp: true, enableAutoSync: true }),
     home: fakeHome,
     platform: "win32",
   });
@@ -1422,7 +1427,7 @@ test("v2.5.0: copilot-json format (type:local + tools preservation), persistent 
 
     const hub2 = createHubController({
       dataDir,
-      readSettings: async () => ({ autoBackup: false, excludeBuiltinMcp: true }),
+      readSettings: async () => ({ autoBackup: false, excludeBuiltinMcp: true, enableAutoSync: true }),
       home: fakeHome,
       platform: "win32",
     });
@@ -1533,5 +1538,1027 @@ test("v2.5.2: probeMcpServer reports toolCount & toolNames for Streamable HTTP (
     assert.deepEqual(httpSseRes.tools, [{ name: "sse_tool_1", description: "Streamed SSE tool" }]);
   } finally {
     httpServer.close();
+  }
+});
+
+test("v2.5.4: enableAutoSync and enableBuiltinOAuth plugin settings default ON and dynamically toggle live", async () => {
+  const manifest = JSON.parse(await readFile(path.join(rootDir, "manifest.json"), "utf8"));
+  const autoSyncSetting = manifest.settingsSchema.find((s) => s.key === "enableAutoSync");
+  const oauthSetting = manifest.settingsSchema.find((s) => s.key === "enableBuiltinOAuth");
+  assert.ok(autoSyncSetting, "enableAutoSync must exist in manifest.json settingsSchema");
+  assert.equal(autoSyncSetting.default, true);
+  assert.ok(oauthSetting, "enableBuiltinOAuth must exist in manifest.json settingsSchema");
+  assert.equal(oauthSetting.default, true);
+
+  const tmpRoot = await mkdtemp(path.join(os.tmpdir(), "mcp-hub-flags-"));
+  const fakeHome = path.join(tmpRoot, "home");
+  const dataDir = path.join(tmpRoot, "data");
+  await mkdir(path.join(fakeHome, ".codex"), { recursive: true });
+  await mkdir(path.join(fakeHome, ".pi", "agent"), { recursive: true });
+  const codexFile = path.join(fakeHome, ".codex", "config.toml");
+  const piFile = path.join(fakeHome, ".pi", "agent", "mcp.json");
+  await writeFile(codexFile, '[mcp_servers.alpha]\nurl = "https://alpha.example.com/mcp"\n', "utf8");
+  await writeFile(piFile, JSON.stringify({ mcpServers: {} }), "utf8");
+
+  const liveSettings = {
+    autoBackup: false,
+    excludeBuiltinMcp: true,
+    enableAutoSync: false,
+    enableBuiltinOAuth: false,
+  };
+  const hub = createHubController({
+    dataDir,
+    readSettings: async () => ({ ...liveSettings }),
+    home: fakeHome,
+    platform: "win32",
+    watchDebounceMs: 5000,
+  });
+
+  try {
+    await hub.initAutoSync();
+    const ovOff = await hub.buildOverview();
+    assert.deepEqual(ovOff.features, { autoSyncEnabled: false, oauthEnabled: false });
+    assert.equal(ovOff.autoSync.enabled, false);
+    assert.equal(ovOff.autoSync.watchingCount, 0);
+
+    // Even if a watched target changes while setting is OFF, nothing propagates
+    await writeFile(
+      codexFile,
+      '[mcp_servers.alpha]\nurl = "https://alpha.example.com/mcp"\n\n[mcp_servers.beta]\nurl = "https://beta.example.com/mcp"\n',
+      "utf8",
+    );
+    const blockedRes = await hub.handleWatchedTargetChange("codex");
+    assert.equal(blockedRes.propagated, 0);
+
+    // OAuth start rejects when enableBuiltinOAuth is OFF
+    const saved = await hub.saveServer({
+      name: "remote_api",
+      enabled: true,
+      transport: { type: "http", url: "https://remote.example.com/mcp" },
+      targets: [],
+    });
+    const remoteSrv = saved.servers.find((s) => s.name === "remote_api");
+    assert.equal(remoteSrv.oauth, null);
+    await assert.rejects(() => hub.oauthStart({ id: remoteSrv.id }), /disabled/i);
+
+    // Flip enableAutoSync ON dynamically -> getRevision detects change, bumps revision, and starts watchers
+    const revBefore = (await hub.getRevision()).revision;
+    liveSettings.enableAutoSync = true;
+    const revAfter = (await hub.getRevision()).revision;
+    assert.ok(revAfter > revBefore, "Flipping plugin setting should bump revision");
+    const ovOn = await hub.buildOverview();
+    assert.equal(ovOn.features.autoSyncEnabled, true);
+    assert.equal(ovOn.autoSync.enabled, true);
+    assert.equal(ovOn.autoSync.watchingCount, 2);
+
+    // Flip enableAutoSync back OFF -> stops all watchers immediately
+    liveSettings.enableAutoSync = false;
+    await hub.getRevision();
+    const ovOffAgain = await hub.buildOverview();
+    assert.equal(ovOffAgain.features.autoSyncEnabled, false);
+    assert.equal(ovOffAgain.autoSync.enabled, false);
+    assert.equal(ovOffAgain.autoSync.watchingCount, 0);
+  } finally {
+    hub.dispose();
+    await rm(tmpRoot, { recursive: true, force: true });
+  }
+});
+
+test("v2.5.4: built-in MCP OAuth 2.1 PKCE login, tool probe with Bearer token, refresh, header sync, and logout (zero child_process)", async () => {
+  let registeredClientId = "";
+  let issuedChallenge = "";
+  let activeAccessToken = "tok-access-1";
+  let authBaseUrl = "";
+
+  const mockServer = http.createServer((req, res) => {
+    let raw = "";
+    req.on("data", (c) => {
+      raw += c;
+    });
+    req.on("end", () => {
+      const u = new URL(req.url || "/", authBaseUrl);
+      if (u.pathname === "/.well-known/oauth-protected-resource") {
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(
+          JSON.stringify({
+            resource: `${authBaseUrl}/mcp`,
+            authorization_servers: [authBaseUrl],
+            scopes_supported: ["mcp:read", "mcp:tools"],
+          }),
+        );
+        return;
+      }
+      if (u.pathname === "/.well-known/oauth-authorization-server") {
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(
+          JSON.stringify({
+            issuer: authBaseUrl,
+            authorization_endpoint: `${authBaseUrl}/authorize`,
+            token_endpoint: `${authBaseUrl}/token`,
+            registration_endpoint: `${authBaseUrl}/register`,
+          }),
+        );
+        return;
+      }
+      if (u.pathname === "/register" && req.method === "POST") {
+        const body = JSON.parse(raw);
+        assert.ok(Array.isArray(body.redirect_uris) && body.redirect_uris[0].startsWith("http://127.0.0.1:"));
+        registeredClientId = "dyn-client-42";
+        res.writeHead(201, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ client_id: registeredClientId }));
+        return;
+      }
+      if (u.pathname === "/token" && req.method === "POST") {
+        const form = new URLSearchParams(raw);
+        assert.equal(form.get("client_id"), registeredClientId);
+        const grantType = form.get("grant_type");
+        if (grantType === "authorization_code") {
+          const verifier = form.get("code_verifier") || "";
+          const computed = createHash("sha256").update(verifier).digest("base64url");
+          assert.equal(computed, issuedChallenge, "PKCE S256 verifier must match code_challenge");
+          assert.equal(form.get("code"), "mock-auth-code-99");
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(
+            JSON.stringify({
+              access_token: "tok-access-1",
+              refresh_token: "tok-refresh-1",
+              token_type: "Bearer",
+              expires_in: 3600,
+              scope: "mcp:read mcp:tools",
+            }),
+          );
+          return;
+        }
+        if (grantType === "refresh_token") {
+          assert.equal(form.get("refresh_token"), "tok-refresh-1");
+          activeAccessToken = "tok-access-2";
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(
+            JSON.stringify({
+              access_token: "tok-access-2",
+              refresh_token: "tok-refresh-2",
+              token_type: "Bearer",
+              expires_in: 7200,
+            }),
+          );
+          return;
+        }
+      }
+      if (u.pathname === "/mcp") {
+        const auth = req.headers.authorization || "";
+        if (auth !== `Bearer ${activeAccessToken}`) {
+          res.writeHead(401, {
+            "WWW-Authenticate": `Bearer resource_metadata="${authBaseUrl}/.well-known/oauth-protected-resource"`,
+          });
+          res.end("Unauthorized");
+          return;
+        }
+        const msg = raw ? JSON.parse(raw) : {};
+        if (msg.method === "initialize") {
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ jsonrpc: "2.0", id: msg.id, result: { protocolVersion: "2024-11-05" } }));
+        } else if (msg.method === "notifications/initialized") {
+          res.writeHead(202);
+          res.end();
+        } else if (msg.method === "tools/list") {
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(
+            JSON.stringify({
+              jsonrpc: "2.0",
+              id: msg.id,
+              result: {
+                tools: [
+                  { name: "list_pages", description: "List workspace pages" },
+                  { name: "create_page", description: "Create a new page" },
+                ],
+              },
+            }),
+          );
+        }
+        return;
+      }
+      res.writeHead(404);
+      res.end("Not found");
+    });
+  });
+
+  await new Promise((resolve) => mockServer.listen(0, "127.0.0.1", resolve));
+  const mockPort = mockServer.address().port;
+  authBaseUrl = `http://127.0.0.1:${mockPort}`;
+
+  const tmpRoot = await mkdtemp(path.join(os.tmpdir(), "mcp-hub-oauth-"));
+  const fakeHome = path.join(tmpRoot, "home");
+  const dataDir = path.join(tmpRoot, "data");
+  await mkdir(path.join(fakeHome, ".pi", "agent"), { recursive: true });
+  const piFile = path.join(fakeHome, ".pi", "agent", "mcp.json");
+  await writeFile(piFile, JSON.stringify({ mcpServers: {} }), "utf8");
+
+  const hub = createHubController({
+    dataDir,
+    readSettings: async () => ({
+      autoBackup: false,
+      excludeBuiltinMcp: true,
+      httpProbeTimeoutMs: 4000,
+      enableAutoSync: false,
+      enableBuiltinOAuth: true,
+    }),
+    home: fakeHome,
+    platform: "win32",
+  });
+
+  try {
+    const ovInit = await hub.saveServer({
+      name: "notion_oauth",
+      enabled: true,
+      transport: { type: "http", url: `${authBaseUrl}/mcp` },
+      targets: ["pi"],
+    });
+    const srv = ovInit.servers.find((s) => s.name === "notion_oauth");
+    assert.equal(ovInit.features.oauthEnabled, true);
+    assert.equal(srv.oauth.authenticated, false);
+
+    // 1. Unauthenticated probe reports 401 needsAuth
+    const preProbe = await hub.probeServer({ id: srv.id });
+    assert.equal(preProbe.ok, true);
+    assert.equal(preProbe.needsAuth, true);
+    assert.equal(preProbe.status, 401);
+
+    // 2. Start OAuth login -> returns authUrl + loopback callback
+    const started = await hub.oauthStart({ id: srv.id });
+    const parsedAuth = new URL(started.authUrl);
+    assert.equal(parsedAuth.origin, authBaseUrl);
+    assert.equal(parsedAuth.pathname, "/authorize");
+    assert.equal(parsedAuth.searchParams.get("code_challenge_method"), "S256");
+    assert.equal(parsedAuth.searchParams.get("client_id"), "dyn-client-42");
+    issuedChallenge = parsedAuth.searchParams.get("code_challenge");
+    const stateParam = parsedAuth.searchParams.get("state");
+    const redirectUri = parsedAuth.searchParams.get("redirect_uri");
+
+    // 3. Simulate browser redirect hitting loopback callback
+    const cbResp = await fetch(
+      `${redirectUri}?code=mock-auth-code-99&state=${encodeURIComponent(stateParam)}`,
+    );
+    assert.equal(cbResp.status, 200);
+    const cbHtml = await cbResp.text();
+    assert.ok(cbHtml.includes("Authorization Complete"));
+
+    // 4. Status reports completed, overview shows authenticated WITHOUT leaking raw tokens
+    const st = await hub.oauthStatus({ id: srv.id });
+    assert.equal(st.pending.status, "completed");
+    assert.equal(st.oauth.authenticated, true);
+    assert.equal(st.oauth.hasRefreshToken, true);
+
+    const ovAuthed = await hub.buildOverview();
+    const rawOverviewJson = JSON.stringify(ovAuthed);
+    assert.ok(!rawOverviewJson.includes("tok-access-1"), "Raw accessToken must never be leaked in overview");
+    assert.ok(!rawOverviewJson.includes("tok-refresh-1"), "Raw refreshToken must never be leaked in overview");
+
+    // 5. Probe automatically injects OAuth Bearer token and discovers tools
+    const authedProbe = await hub.probeServer({ id: srv.id });
+    assert.equal(authedProbe.ok, true);
+    assert.equal(authedProbe.needsAuth, false);
+    assert.equal(authedProbe.usedOAuth, true);
+    assert.equal(authedProbe.toolCount, 2);
+    assert.deepEqual(authedProbe.tools, [
+      { name: "list_pages", description: "List workspace pages" },
+      { name: "create_page", description: "Create a new page" },
+    ]);
+
+    // 6. Refresh OAuth token -> exchanges refresh_token for tok-access-2
+    const refreshed = await hub.oauthRefresh({ id: srv.id });
+    assert.equal(refreshed.oauth.authenticated, true);
+    const postRefreshProbe = await hub.probeServer({ id: srv.id });
+    assert.equal(postRefreshProbe.ok, true);
+    assert.equal(postRefreshProbe.usedOAuth, true);
+
+    // 7. Apply OAuth Header -> writes Bearer tok-access-2 into server.transport.headers (does NOT touch Pi file yet)
+    const ovHeader = await hub.oauthApplyHeader({ id: srv.id });
+    const srvWithHeader = ovHeader.servers.find((s) => s.id === srv.id);
+    assert.equal(srvWithHeader.transport.headers.Authorization, "Bearer tok-access-2");
+    const piBeforeApply = JSON.parse(await readFile(piFile, "utf8"));
+    assert.deepEqual(piBeforeApply.mcpServers, {}, "Applying OAuth header must wait for user Apply confirmation");
+
+    // 8. Logout clears stored token
+    const ovLoggedOut = await hub.oauthLogout({ id: srv.id });
+    const srvOut = ovLoggedOut.servers.find((s) => s.id === srv.id);
+    assert.equal(srvOut.oauth.authenticated, false);
+  } finally {
+    hub.dispose();
+    mockServer.close();
+    await rm(tmpRoot, { recursive: true, force: true });
+  }
+});
+
+test("v2.5.4: OAuth background auto-refresh rotates due tokens, updates synced AI headers silently, and deduplicates concurrent refreshes", async () => {
+  let authBaseUrl = "";
+  let refreshHits = 0;
+
+  const mockServer = http.createServer((req, res) => {
+    let raw = "";
+    req.on("data", (c) => {
+      raw += c;
+    });
+    req.on("end", () => {
+      const u = new URL(req.url || "/", authBaseUrl);
+      if (u.pathname === "/.well-known/oauth-protected-resource") {
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ resource: `${authBaseUrl}/mcp`, authorization_servers: [authBaseUrl] }));
+        return;
+      }
+      if (u.pathname === "/.well-known/oauth-authorization-server") {
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(
+          JSON.stringify({
+            issuer: authBaseUrl,
+            authorization_endpoint: `${authBaseUrl}/authorize`,
+            token_endpoint: `${authBaseUrl}/token`,
+            registration_endpoint: `${authBaseUrl}/register`,
+          }),
+        );
+        return;
+      }
+      if (u.pathname === "/register" && req.method === "POST") {
+        res.writeHead(201, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ client_id: "auto-refresh-client" }));
+        return;
+      }
+      if (u.pathname === "/token" && req.method === "POST") {
+        const form = new URLSearchParams(raw);
+        if (form.get("grant_type") === "authorization_code") {
+          // Issue short-lived token (expires in 120s, well inside 5-min auto-refresh threshold)
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(
+            JSON.stringify({
+              access_token: "tok-initial-1",
+              refresh_token: "rt-1",
+              token_type: "Bearer",
+              expires_in: 120,
+            }),
+          );
+          return;
+        }
+        if (form.get("grant_type") === "refresh_token") {
+          refreshHits++;
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(
+            JSON.stringify({
+              access_token: `tok-rotated-${refreshHits}`,
+              refresh_token: `rt-${refreshHits + 1}`,
+              token_type: "Bearer",
+              expires_in: 7200,
+            }),
+          );
+          return;
+        }
+      }
+      res.writeHead(401);
+      res.end("Unauthorized");
+    });
+  });
+
+  await new Promise((resolve) => mockServer.listen(0, "127.0.0.1", resolve));
+  authBaseUrl = `http://127.0.0.1:${mockServer.address().port}`;
+
+  const tmpRoot = await mkdtemp(path.join(os.tmpdir(), "mcp-hub-oauth-autorefresh-"));
+  const fakeHome = path.join(tmpRoot, "home");
+  const dataDir = path.join(tmpRoot, "data");
+  await mkdir(path.join(fakeHome, ".pi", "agent"), { recursive: true });
+  await mkdir(path.join(fakeHome, ".cursor"), { recursive: true });
+  const piFile = path.join(fakeHome, ".pi", "agent", "mcp.json");
+  const cursorFile = path.join(fakeHome, ".cursor", "mcp.json");
+  await writeFile(piFile, JSON.stringify({ mcpServers: {} }), "utf8");
+  await writeFile(cursorFile, JSON.stringify({ mcpServers: {} }), "utf8");
+
+  const hub = createHubController({
+    dataDir,
+    readSettings: async () => ({
+      autoBackup: false,
+      excludeBuiltinMcp: true,
+      enableAutoSync: false,
+      enableBuiltinOAuth: true,
+    }),
+    home: fakeHome,
+    platform: "win32",
+    oauthRefreshIntervalMs: 60_000,
+    oauthRefreshThresholdMs: 5 * 60_000,
+  });
+
+  try {
+    // Save MCP targeting Pi & Cursor; apply ONLY to Pi after writing OAuth header
+    const ov1 = await hub.saveServer({
+      name: "notion_auto",
+      enabled: true,
+      transport: { type: "http", url: `${authBaseUrl}/mcp` },
+      targets: ["pi"],
+    });
+    const srv = ov1.servers.find((s) => s.name === "notion_auto");
+
+    // Complete login -> receives short-lived tok-initial-1 (expires in 120s < 300s threshold)
+    const started = await hub.oauthStart({ id: srv.id });
+    const parsedAuth = new URL(started.authUrl);
+    await fetch(
+      `${parsedAuth.searchParams.get("redirect_uri")}?code=code-auto&state=${encodeURIComponent(parsedAuth.searchParams.get("state"))}`,
+    );
+
+    // User clicks "Write Header & Sync" and applies to Pi (Cursor NOT selected/applied)
+    await hub.oauthApplyHeader({ id: srv.id });
+    await hub.applySingleServer({ id: srv.id });
+    const piInitial = JSON.parse(await readFile(piFile, "utf8"));
+    assert.equal(piInitial.mcpServers.notion_auto.headers.Authorization, "Bearer tok-initial-1");
+
+    // Trigger concurrent refresh checks -> deduplication must hit /token only ONCE and update Pi silently
+    const [r1, r2] = await Promise.all([
+      hub.runOAuthAutoRefreshCheck(),
+      hub.runOAuthAutoRefreshCheck(),
+    ]);
+    assert.equal(refreshHits, 1, "Concurrent refresh checks must deduplicate rotating refresh_token calls");
+    assert.ok(r1.refreshedCount + r2.refreshedCount >= 1);
+
+    const piAfter = JSON.parse(await readFile(piFile, "utf8"));
+    const cursorAfter = JSON.parse(await readFile(cursorFile, "utf8"));
+    assert.equal(
+      piAfter.mcpServers.notion_auto.headers.Authorization,
+      "Bearer tok-rotated-1",
+      "Synced AI (Pi) must automatically receive the refreshed Bearer token on disk",
+    );
+    assert.equal(
+      cursorAfter.mcpServers.notion_auto,
+      undefined,
+      "Unsynced AI (Cursor) must never be modified by background token refresh",
+    );
+
+    // Hub state also reflects rotated token with oauthHeaderManaged preserved
+    const ovAfter = await hub.buildOverview();
+    const srvAfter = ovAfter.servers.find((s) => s.id === srv.id);
+    assert.equal(srvAfter.oauthHeaderManaged, true);
+    assert.equal(srvAfter.transport.headers.Authorization, "Bearer tok-rotated-1");
+  } finally {
+    hub.dispose();
+    mockServer.close();
+    await rm(tmpRoot, { recursive: true, force: true });
+  }
+});
+
+test("v2.5.4: multi-account per-card OAuth isolation (AI A = Account A, AI B/C = Account B, AI D = native login) + legacy migration", async () => {
+  let authBaseUrl = "";
+  const mockServer = http.createServer((req, res) => {
+    let raw = "";
+    req.on("data", (c) => {
+      raw += c;
+    });
+    req.on("end", () => {
+      const u = new URL(req.url || "/", authBaseUrl);
+      if (u.pathname === "/.well-known/oauth-protected-resource") {
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ resource: `${authBaseUrl}/mcp`, authorization_servers: [authBaseUrl] }));
+        return;
+      }
+      if (u.pathname === "/.well-known/oauth-authorization-server") {
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(
+          JSON.stringify({
+            issuer: authBaseUrl,
+            authorization_endpoint: `${authBaseUrl}/authorize`,
+            token_endpoint: `${authBaseUrl}/token`,
+            registration_endpoint: `${authBaseUrl}/register`,
+          }),
+        );
+        return;
+      }
+      if (u.pathname === "/register" && req.method === "POST") {
+        res.writeHead(201, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ client_id: "multi-acct-client" }));
+        return;
+      }
+      if (u.pathname === "/token" && req.method === "POST") {
+        const form = new URLSearchParams(raw);
+        if (form.get("grant_type") === "authorization_code") {
+          const code = form.get("code");
+          if (code === "code-account-A") {
+            res.writeHead(200, { "Content-Type": "application/json" });
+            res.end(
+              JSON.stringify({
+                access_token: "tok-A-1",
+                refresh_token: "rt-A-1",
+                token_type: "Bearer",
+                expires_in: 120,
+              }),
+            );
+            return;
+          }
+          if (code === "code-account-B") {
+            res.writeHead(200, { "Content-Type": "application/json" });
+            res.end(
+              JSON.stringify({
+                access_token: "tok-B-1",
+                refresh_token: "rt-B-1",
+                token_type: "Bearer",
+                expires_in: 7200,
+              }),
+            );
+            return;
+          }
+        }
+        if (form.get("grant_type") === "refresh_token") {
+          const rt = form.get("refresh_token");
+          if (rt === "rt-A-1") {
+            res.writeHead(200, { "Content-Type": "application/json" });
+            res.end(
+              JSON.stringify({
+                access_token: "tok-A-2",
+                refresh_token: "rt-A-2",
+                token_type: "Bearer",
+                expires_in: 7200,
+              }),
+            );
+            return;
+          }
+        }
+      }
+      res.writeHead(401);
+      res.end("Unauthorized");
+    });
+  });
+
+  await new Promise((resolve) => mockServer.listen(0, "127.0.0.1", resolve));
+  authBaseUrl = `http://127.0.0.1:${mockServer.address().port}`;
+  const sharedUrl = `${authBaseUrl}/mcp`;
+
+  const tmpRoot = await mkdtemp(path.join(os.tmpdir(), "mcp-hub-multi-oauth-"));
+  const fakeHome = path.join(tmpRoot, "home");
+  const dataDir = path.join(tmpRoot, "data");
+  await mkdir(path.join(fakeHome, ".codex"), { recursive: true });
+  await mkdir(path.join(fakeHome, ".pi", "agent"), { recursive: true });
+  await mkdir(path.join(fakeHome, ".cursor"), { recursive: true });
+  await mkdir(dataDir, { recursive: true });
+
+  const codexFile = path.join(fakeHome, ".codex", "config.toml");
+  const piFile = path.join(fakeHome, ".pi", "agent", "mcp.json");
+  const cursorFile = path.join(fakeHome, ".cursor", "mcp.json");
+  const claudeFile = path.join(fakeHome, ".claude.json");
+  await writeFile(codexFile, 'model = "gpt-5"\n', "utf8");
+  await writeFile(piFile, JSON.stringify({ mcpServers: {} }), "utf8");
+  await writeFile(cursorFile, JSON.stringify({ mcpServers: {} }), "utf8");
+  await writeFile(claudeFile, JSON.stringify({ mcpServers: {} }), "utf8");
+
+  const hub = createHubController({
+    dataDir,
+    readSettings: async () => ({
+      autoBackup: false,
+      excludeBuiltinMcp: true,
+      enableAutoSync: false,
+      enableBuiltinOAuth: true,
+    }),
+    home: fakeHome,
+    platform: "win32",
+    oauthRefreshThresholdMs: 5 * 60_000,
+  });
+
+  try {
+    // Create 3 same-name `notion` cards pointing to the EXACT same URL
+    await hub.saveServer({
+      name: "notion",
+      alias: "Account A",
+      enabled: true,
+      transport: { type: "http", url: sharedUrl },
+      targets: ["codex"],
+    });
+    await hub.saveServer({
+      name: "notion",
+      alias: "Account B",
+      enabled: true,
+      transport: { type: "http", url: sharedUrl },
+      targets: ["pi", "cursor"],
+    });
+    const ovSetup = await hub.saveServer({
+      name: "notion",
+      alias: "",
+      enabled: true,
+      transport: { type: "http", url: sharedUrl },
+      targets: ["claude-code"],
+    });
+
+    const cardA = ovSetup.servers.find((s) => s.alias === "Account A");
+    const cardB = ovSetup.servers.find((s) => s.alias === "Account B");
+    const cardD = ovSetup.servers.find((s) => s.alias === "");
+    assert.ok(cardA && cardB && cardD);
+
+    // 1. Login Account A on Card A (short-lived 120s token) -> Write Header & Apply to Codex
+    const startA = await hub.oauthStart({ id: cardA.id });
+    const authA = new URL(startA.authUrl);
+    await fetch(
+      `${authA.searchParams.get("redirect_uri")}?code=code-account-A&state=${encodeURIComponent(authA.searchParams.get("state"))}`,
+    );
+    await hub.oauthApplyHeader({ id: cardA.id });
+    await hub.applySingleServer({ id: cardA.id });
+
+    // 2. Login Account B on Card B (long-lived 7200s token) -> Write Header & Apply to Pi & Cursor
+    const startB = await hub.oauthStart({ id: cardB.id });
+    const authB = new URL(startB.authUrl);
+    await fetch(
+      `${authB.searchParams.get("redirect_uri")}?code=code-account-B&state=${encodeURIComponent(authB.searchParams.get("state"))}`,
+    );
+    await hub.oauthApplyHeader({ id: cardB.id });
+    await hub.applySingleServer({ id: cardB.id });
+
+    // 3. Apply Card D (native login, NO OAuth header) to Claude Code
+    await hub.applySingleServer({ id: cardD.id });
+
+    // Verify all 4 AIs got their exact isolated configs
+    const codex1 = parseCodexMcpServers(await readFile(codexFile, "utf8"));
+    const pi1 = JSON.parse(await readFile(piFile, "utf8"));
+    const cursor1 = JSON.parse(await readFile(cursorFile, "utf8"));
+    const claude1 = JSON.parse(await readFile(claudeFile, "utf8"));
+    assert.equal(codex1.notion.transport.headers.Authorization, "Bearer tok-A-1");
+    assert.equal(pi1.mcpServers.notion.headers.Authorization, "Bearer tok-B-1");
+    assert.equal(cursor1.mcpServers.notion.headers.Authorization, "Bearer tok-B-1");
+    assert.equal(claude1.mcpServers.notion.headers, undefined);
+
+    // 4. Background auto-refresh: ONLY Account A is due -> rotates Codex to tok-A-2, leaves Pi/Cursor/Claude untouched!
+    const refreshRes = await hub.runOAuthAutoRefreshCheck();
+    assert.equal(refreshRes.refreshedCount, 1);
+    assert.equal(refreshRes.updatedTargets, 1);
+
+    const codex2 = parseCodexMcpServers(await readFile(codexFile, "utf8"));
+    const pi2 = JSON.parse(await readFile(piFile, "utf8"));
+    const cursor2 = JSON.parse(await readFile(cursorFile, "utf8"));
+    const claude2 = JSON.parse(await readFile(claudeFile, "utf8"));
+    assert.equal(codex2.notion.transport.headers.Authorization, "Bearer tok-A-2");
+    assert.equal(pi2.mcpServers.notion.headers.Authorization, "Bearer tok-B-1");
+    assert.equal(cursor2.mcpServers.notion.headers.Authorization, "Bearer tok-B-1");
+    assert.equal(claude2.mcpServers.notion.headers, undefined);
+
+    // 5. Logging out Card A leaves Card B authenticated and Card D untouched
+    const ovAfterLogoutA = await hub.oauthLogout({ id: cardA.id });
+    assert.equal(ovAfterLogoutA.servers.find((s) => s.id === cardA.id).oauth.authenticated, false);
+    assert.equal(ovAfterLogoutA.servers.find((s) => s.id === cardB.id).oauth.authenticated, true);
+    assert.equal(ovAfterLogoutA.servers.find((s) => s.id === cardD.id).oauth.authenticated, false);
+
+    // 6. Legacy URL-keyed token migrates cleanly to the unaliased card on restart
+    await writeFile(
+      path.join(dataDir, "oauth-tokens.json"),
+      JSON.stringify(
+        {
+          [sharedUrl]: {
+            serverUrl: sharedUrl,
+            accessToken: "legacy-tok-99",
+            refreshToken: "",
+            tokenType: "Bearer",
+            expiresAt: Date.now() + 3600_000,
+            obtainedAt: new Date().toISOString(),
+          },
+        },
+        null,
+        2,
+      ),
+      "utf8",
+    );
+    const hubRestart = createHubController({
+      dataDir,
+      readSettings: async () => ({
+        autoBackup: false,
+        excludeBuiltinMcp: true,
+        enableAutoSync: false,
+        enableBuiltinOAuth: true,
+      }),
+      home: fakeHome,
+      platform: "win32",
+    });
+    try {
+      const ovMigrated = await hubRestart.buildOverview();
+      // Card A & B had oauthHeaderManaged (A logged out, B still true) -> migrates to B (oauthHeaderManaged)
+      assert.equal(ovMigrated.servers.find((s) => s.id === cardB.id).oauth.authenticated, true);
+      assert.equal(ovMigrated.servers.find((s) => s.id === cardA.id).oauth.authenticated, false);
+      assert.equal(ovMigrated.servers.find((s) => s.id === cardD.id).oauth.authenticated, false);
+    } finally {
+      hubRestart.dispose();
+    }
+  } finally {
+    hub.dispose();
+    mockServer.close();
+    await rm(tmpRoot, { recursive: true, force: true });
+  }
+});
+
+test("v2.5.4: persistent one-time auth-hint discovery detects 401 vs 200 once and issues 0 repeat probes across restarts", async () => {
+  let authHits = 0;
+  let openHits = 0;
+  const mockServer = http.createServer((req, res) => {
+    req.resume();
+    req.on("end", () => {
+      if (req.url === "/needs-auth") {
+        if (req.headers.authorization === "Bearer valid-tok") {
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ jsonrpc: "2.0", id: 1, result: {} }));
+          return;
+        }
+        authHits++;
+        res.writeHead(401, { "Content-Type": "text/plain" });
+        res.end("Unauthorized");
+        return;
+      }
+      if (req.url === "/public-mcp") {
+        openHits++;
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ jsonrpc: "2.0", id: 1, result: {} }));
+        return;
+      }
+      res.writeHead(404);
+      res.end();
+    });
+  });
+
+  await new Promise((resolve) => mockServer.listen(0, "127.0.0.1", resolve));
+  const baseUrl = `http://127.0.0.1:${mockServer.address().port}`;
+  const tmpRoot = await mkdtemp(path.join(os.tmpdir(), "mcp-hub-auth-hints-"));
+  const fakeHome = path.join(tmpRoot, "home");
+  const dataDir = path.join(tmpRoot, "data");
+  await mkdir(fakeHome, { recursive: true });
+
+  const makeHub = () =>
+    createHubController({
+      dataDir,
+      readSettings: async () => ({
+        autoBackup: false,
+        excludeBuiltinMcp: true,
+        enableAutoSync: false,
+        enableBuiltinOAuth: true,
+      }),
+      home: fakeHome,
+      platform: "win32",
+    });
+
+  const hub1 = makeHub();
+  try {
+    await hub1.saveServer({
+      name: "notion_like",
+      enabled: true,
+      transport: { type: "http", url: `${baseUrl}/needs-auth` },
+      targets: [],
+    });
+    await hub1.saveServer({
+      name: "public_docs",
+      enabled: true,
+      transport: { type: "http", url: `${baseUrl}/public-mcp` },
+      targets: [],
+    });
+
+    const ovBefore = await hub1.buildOverview();
+    assert.equal(ovBefore.servers.find((s) => s.name === "notion_like").needsAuthCheck, true);
+    assert.equal(ovBefore.servers.find((s) => s.name === "public_docs").needsAuthCheck, true);
+
+    // 1. First run probes both URLs once and persists results
+    const first = await hub1.probeUncheckedAuthHints();
+    assert.equal(first.checked, 2);
+    assert.equal(first.needsAuthCount, 1);
+    assert.equal(authHits, 1);
+    assert.ok(openHits >= 1);
+
+    const authHitsAfterFirst = authHits;
+    const openHitsAfterFirst = openHits;
+
+    const srvAuth = first.overview.servers.find((s) => s.name === "notion_like");
+    const srvPublic = first.overview.servers.find((s) => s.name === "public_docs");
+    assert.equal(srvAuth.needsAuthCheck, false);
+    assert.deepEqual(srvAuth.oauthAuthHint, { needsAuth: true, status: 401 });
+    assert.equal(srvPublic.needsAuthCheck, false);
+    assert.deepEqual(srvPublic.oauthAuthHint, { needsAuth: false, status: 200 });
+
+    // 2. Cloned variant of the same URL inherits cached hint with 0 network probes
+    const ovCloned = await hub1.saveServer({
+      name: "notion_like",
+      alias: "Account 2",
+      enabled: true,
+      transport: { type: "http", url: `${baseUrl}/needs-auth` },
+      targets: [],
+    });
+    const clonedSrv = ovCloned.servers.find((s) => s.alias === "Account 2");
+    assert.equal(clonedSrv.needsAuthCheck, false);
+    assert.deepEqual(clonedSrv.oauthAuthHint, { needsAuth: true, status: 401 });
+
+    // 2b. Probing a sibling variant that has an Authorization header returning 200 must NOT erase needsAuth=true for unauthenticated siblings
+    await hub1.saveServer({
+      id: srvAuth.id,
+      name: "notion_like",
+      alias: "",
+      enabled: true,
+      transport: {
+        type: "http",
+        url: `${baseUrl}/needs-auth`,
+        headers: { Authorization: "Bearer valid-tok" },
+      },
+      targets: [],
+    });
+    await hub1.probeServer({ id: srvAuth.id });
+    const ovAfterAuthedProbe = await hub1.buildOverview();
+    const clonedStillNeedsAuth = ovAfterAuthedProbe.servers.find((s) => s.alias === "Account 2");
+    assert.equal(
+      clonedStillNeedsAuth.oauthAuthHint?.needsAuth,
+      true,
+      "Probing an authenticated variant must never erase needsAuth hint for sibling unauthenticated accounts",
+    );
+
+    // 3. Reopening / restarting backend issues 0 repeat network probes
+    hub1.dispose();
+    const hub2 = makeHub();
+    try {
+      const ovReloaded = await hub2.buildOverview();
+      assert.equal(ovReloaded.servers.every((s) => s.needsAuthCheck === false), true);
+      const second = await hub2.probeUncheckedAuthHints();
+      assert.equal(second.checked, 0);
+      assert.equal(authHits, authHitsAfterFirst, "Restart must not re-probe cached 401 URL");
+      assert.equal(openHits, openHitsAfterFirst, "Restart must not re-probe cached 200 URL");
+    } finally {
+      hub2.dispose();
+    }
+  } finally {
+    hub1.dispose();
+    mockServer.close();
+    await rm(tmpRoot, { recursive: true, force: true });
+  }
+});
+
+test("v2.5.4: packaged extension source passes CodexHost static safety scan (zero eval, Function, or subprocess imports)", async () => {
+  const dirs = ["backend", "page", "shared"];
+  const forbidden = /\beval\s*\(|\bnew\s+Function\b|\bchild_process\b/;
+  const violations = [];
+
+  async function walk(relDir) {
+    const entries = await readdir(path.join(rootDir, relDir), { withFileTypes: true });
+    for (const entry of entries) {
+      const rel = path.posix.join(relDir, entry.name);
+      if (entry.isDirectory()) {
+        await walk(rel);
+      } else if (entry.name.endsWith(".mjs") || entry.name.endsWith(".js")) {
+        const src = await readFile(path.join(rootDir, rel), "utf8");
+        if (forbidden.test(src)) {
+          violations.push(rel);
+        }
+      }
+    }
+  }
+
+  for (const d of dirs) await walk(d);
+  assert.deepEqual(violations, [], `Packaged files failed static safety scan: ${violations.join(", ")}`);
+});
+
+test("v2.5.4: OAuth hardening — SSE GET discovery, invalid state rejection, duplicate callback guard, cancel, logout header cleanup, and sibling-delete token cleanup", async () => {
+  let baseUrl = "";
+  let tokenExchangeCount = 0;
+
+  const mockServer = http.createServer((req, res) => {
+    let raw = "";
+    req.on("data", (c) => {
+      raw += c;
+    });
+    req.on("end", () => {
+      const u = new URL(req.url || "/", baseUrl);
+      // SSE endpoint returns 405 on POST and WWW-Authenticate on GET
+      if (u.pathname === "/sse-mcp") {
+        if (req.method === "POST") {
+          res.writeHead(405);
+          res.end("Method Not Allowed");
+          return;
+        }
+        res.writeHead(401, {
+          "WWW-Authenticate": `Bearer resource_metadata="${baseUrl}/custom-prm.json"`,
+        });
+        res.end("Unauthorized");
+        return;
+      }
+      if (u.pathname === "/custom-prm.json") {
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ resource: `${baseUrl}/sse-mcp`, authorization_servers: [baseUrl] }));
+        return;
+      }
+      if (u.pathname === "/.well-known/oauth-authorization-server") {
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(
+          JSON.stringify({
+            issuer: baseUrl,
+            authorization_endpoint: `${baseUrl}/authorize`,
+            token_endpoint: `${baseUrl}/token`,
+            registration_endpoint: `${baseUrl}/register`,
+          }),
+        );
+        return;
+      }
+      if (u.pathname === "/register" && req.method === "POST") {
+        res.writeHead(201, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ client_id: "hardening-client" }));
+        return;
+      }
+      if (u.pathname === "/token" && req.method === "POST") {
+        tokenExchangeCount++;
+        // Slight delay to exercise concurrent duplicate /callback guard
+        setTimeout(() => {
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(
+            JSON.stringify({
+              access_token: `tok-hard-${tokenExchangeCount}`,
+              refresh_token: `rt-hard-${tokenExchangeCount}`,
+              token_type: "Bearer",
+              expires_in: 3600,
+            }),
+          );
+        }, 60);
+        return;
+      }
+      res.writeHead(404);
+      res.end();
+    });
+  });
+
+  await new Promise((resolve) => mockServer.listen(0, "127.0.0.1", resolve));
+  baseUrl = `http://127.0.0.1:${mockServer.address().port}`;
+
+  const tmpRoot = await mkdtemp(path.join(os.tmpdir(), "mcp-hub-oauth-hard-"));
+  const fakeHome = path.join(tmpRoot, "home");
+  const dataDir = path.join(tmpRoot, "data");
+  await mkdir(path.join(fakeHome, ".pi", "agent"), { recursive: true });
+  await writeFile(path.join(fakeHome, ".pi", "agent", "mcp.json"), JSON.stringify({ mcpServers: {} }), "utf8");
+
+  const hub = createHubController({
+    dataDir,
+    readSettings: async () => ({
+      autoBackup: false,
+      excludeBuiltinMcp: true,
+      enableAutoSync: false,
+      enableBuiltinOAuth: true,
+    }),
+    home: fakeHome,
+    platform: "win32",
+  });
+
+  try {
+    const ov1 = await hub.saveServer({
+      name: "sse_srv",
+      alias: "Acct 1",
+      enabled: true,
+      transport: { type: "sse", url: `${baseUrl}/sse-mcp`, headers: { "X-Custom": "keep-me" } },
+      targets: ["pi"],
+    });
+    const srv1 = ov1.servers.find((s) => s.alias === "Acct 1");
+
+    // 1. SSE GET WWW-Authenticate discovery works + cancelLogin cleans up cleanly
+    const sCancel = await hub.oauthStart({ id: srv1.id });
+    assert.ok(sCancel.authUrl.startsWith(`${baseUrl}/authorize?`));
+    await hub.oauthCancel({ id: srv1.id });
+    assert.equal((await hub.oauthStatus({ id: srv1.id })).pending.status, "idle");
+
+    // 2. Invalid state rejected with 400 and session status becomes error
+    const sBad = await hub.oauthStart({ id: srv1.id });
+    const badAuth = new URL(sBad.authUrl);
+    const badCb = await fetch(`${badAuth.searchParams.get("redirect_uri")}?code=abc&state=wrong-state`);
+    assert.equal(badCb.status, 400);
+    assert.equal((await hub.oauthStatus({ id: srv1.id })).pending.status, "error");
+
+    // 3. Duplicate concurrent /callback requests only exchange code ONCE
+    const sDup = await hub.oauthStart({ id: srv1.id });
+    const dupAuth = new URL(sDup.authUrl);
+    const cbUrl = `${dupAuth.searchParams.get("redirect_uri")}?code=once-code&state=${encodeURIComponent(dupAuth.searchParams.get("state"))}`;
+    const [rA, rB] = await Promise.all([fetch(cbUrl), fetch(cbUrl)]);
+    assert.equal(rA.status, 200);
+    assert.equal(rB.status, 200);
+    assert.equal(tokenExchangeCount, 1, "Duplicate callback must not double-exchange one-time auth code");
+
+    // 4. Apply header + logout clears OAuth-managed Authorization while preserving X-Custom
+    await hub.oauthApplyHeader({ id: srv1.id });
+    await hub.applySingleServer({ id: srv1.id });
+    const ovOut = await hub.oauthLogout({ id: srv1.id });
+    const srv1AfterOut = ovOut.servers.find((s) => s.id === srv1.id);
+    assert.equal(srv1AfterOut.oauth.authenticated, false);
+    assert.equal(srv1AfterOut.transport.headers.Authorization, undefined);
+    assert.equal(srv1AfterOut.transport.headers["X-Custom"], "keep-me");
+
+    // 5. Re-login srv1, then let sibling Acct 2 take over srv1's only target (pi) -> srv1 auto-deleted AND its token purged
+    const sRe = await hub.oauthStart({ id: srv1.id });
+    const reAuth = new URL(sRe.authUrl);
+    await fetch(
+      `${reAuth.searchParams.get("redirect_uri")}?code=re-code&state=${encodeURIComponent(reAuth.searchParams.get("state"))}`,
+    );
+    const tokensBeforeTakeover = JSON.parse(await readFile(path.join(dataDir, "oauth-tokens.json"), "utf8"));
+    assert.ok(tokensBeforeTakeover[`card:${srv1.id}`], "Token should exist before sibling takeover");
+
+    const ov2 = await hub.saveServer({
+      name: "sse_srv",
+      alias: "Acct 2",
+      enabled: true,
+      transport: { type: "sse", url: `${baseUrl}/sse-mcp` },
+      targets: ["pi"],
+    });
+    const srv2 = ov2.servers.find((s) => s.alias === "Acct 2");
+    await hub.applySingleServer({ id: srv2.id });
+
+    const tokensAfterTakeover = JSON.parse(await readFile(path.join(dataDir, "oauth-tokens.json"), "utf8"));
+    assert.equal(
+      tokensAfterTakeover[`card:${srv1.id}`],
+      undefined,
+      "Superseded sibling variant's OAuth token must be purged when auto-removed",
+    );
+  } finally {
+    hub.dispose();
+    mockServer.close();
+    await rm(tmpRoot, { recursive: true, force: true });
   }
 });

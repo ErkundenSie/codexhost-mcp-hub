@@ -15,6 +15,7 @@ const MAX_BACKUPS = 40;
 export function createDefaultAutoSync() {
   return {
     enabled: false,
+    lastPluginSetting: null,
     mode: "bidirectional",
     primaryTargetId: "",
     updateScope: "existing-only",
@@ -32,6 +33,8 @@ export function normalizeAutoSyncConfig(raw) {
   if (!raw || typeof raw !== "object") return base;
   return {
     enabled: Boolean(raw.enabled),
+    lastPluginSetting:
+      typeof raw.lastPluginSetting === "boolean" ? raw.lastPluginSetting : null,
     mode: raw.mode === "primary" ? "primary" : "bidirectional",
     primaryTargetId: typeof raw.primaryTargetId === "string" ? raw.primaryTargetId.trim() : "",
     updateScope: raw.updateScope === "all-selected" ? "all-selected" : "existing-only",
@@ -57,6 +60,7 @@ export function createEmptyState() {
     customTargets: [],
     managedKeysByTarget: {},
     managedOwnersByTarget: {},
+    authHintsByUrl: {},
     autoSync: createDefaultAutoSync(),
     lastSyncedAt: null,
   };
@@ -107,6 +111,10 @@ export class HubStore {
         managedOwnersByTarget:
           parsed.managedOwnersByTarget && typeof parsed.managedOwnersByTarget === "object"
             ? parsed.managedOwnersByTarget
+            : {},
+        authHintsByUrl:
+          parsed.authHintsByUrl && typeof parsed.authHintsByUrl === "object" && !Array.isArray(parsed.authHintsByUrl)
+            ? parsed.authHintsByUrl
             : {},
         autoSync: normalizeAutoSyncConfig(parsed.autoSync),
         lastSyncedAt: typeof parsed.lastSyncedAt === "string" ? parsed.lastSyncedAt : null,
