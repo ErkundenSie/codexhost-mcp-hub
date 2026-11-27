@@ -41,7 +41,7 @@
 - **⚡ 快速配置向导 & 卡片即时应用**
   支持顶部两步式「快速配置」批量下发/移除（带同名不同配置覆盖保护），也支持单卡片内即时勾选、撤销与一键应用。
 - **🛡️ 安全增量写入 + 自动备份回滚**
-  - Codex / Grok TOML 与 DeepSeek Cordis YAML 均采用块级局部更新，保留原文件注释、模型与无关插件块；Copilot CLI 自动保留已有的 `tools` 白名单；
+  - Codex / Grok TOML、DeepSeek Cordis YAML 与 Hermes YAML 均采用块级局部更新，保留原文件注释、模型、无关插件块与单服务扩展字段；VS Code JSONC 自动保留 `inputs`、`sandbox`、`gallery`、`version` 等元数据；Copilot CLI 自动保留已有的 `tools` 白名单；
   - 自动排除并保护官方内置 MCP（如 Codex `node_repl`）与指向本机 CodexHost（`127.0.0.1:4398/mcp`）的回环 MCP；
   - 每次写入前自动保存带时间戳的原文件备份（最多保留 40 份），支持随时一键恢复。
 - **📁 项目级 MCP 同步**
@@ -112,7 +112,7 @@
 
 - **零外部依赖 & 零子进程**：全部使用 Node.js 原生内置模块，不调用 `child_process`、`eval` 或 `new Function`，完整通过插件市场静态安全扫描。
 - **令牌私有隔离**：OAuth 令牌按卡片 ID 独立存储在插件私有目录 `oauth-tokens.json`（POSIX 权限 `0600`），原始 `access_token` / `refresh_token` 绝不通过 `overview` 接口暴露给前端。
-- **原子写入与熔断保护**：全部文件写入采用临时文件原子替换（`atomicWriteText`）；自动同步内置「整文件清空熔断」与「语法错误熔断」，防止误操作扩散。
+- **原子写入与全格式熔断保护**：全部文件写入采用临时文件原子替换（`atomicWriteText`），兼容 UTF-8 BOM；自动同步按目标 AI 合并为单次备份 + 单次写入，并内置「整文件清空熔断」与 TOML / YAML / JSON / JSONC「语法错误熔断」，防止误操作扩散。
 
 ## 🛠️ 本地开发与测试
 
@@ -132,6 +132,7 @@ node scripts/pack.mjs
 ```text
 codexhost-mcp-hub/
 ├── manifest.json                 # CodexHost manifestVersion: 2 插件清单
+├── CHANGELOG.md                  # 版本更新日志（GitHub Release 自动提取来源）
 ├── assets/
 │   ├── icon.png                  # 插件图标 (256x256 PNG)
 │   └── preview.png               # 界面预览图
@@ -166,6 +167,10 @@ codexhost-mcp-hub/
 ```
 
 </details>
+
+## 📝 更新日志
+
+完整版本变更记录请查看 [CHANGELOG.md](CHANGELOG.md) 或 [GitHub Releases](https://github.com/ErkundenSie/codexhost-mcp-hub/releases)。
 
 ## 📄 License
 
