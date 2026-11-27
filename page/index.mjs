@@ -118,8 +118,15 @@ export async function mount(root, api) {
     }
   }
 
+  function stopAllOAuthPolling() {
+    for (const timer of oauthPollTimers.values()) clearInterval(timer);
+    oauthPollTimers.clear();
+  }
+
+  api.signal.addEventListener("abort", stopAllOAuthPolling, { once: true });
+
   function ensureOAuthPolling(serverId, serverName) {
-    if (oauthPollTimers.has(serverId)) return;
+    if (api.signal.aborted || oauthPollTimers.has(serverId)) return;
     let inFlight = false;
     const timer = setInterval(async () => {
       if (api.signal.aborted || inFlight) return;
@@ -176,7 +183,7 @@ export async function mount(root, api) {
   function hydratePendingOAuth(overview) {
     const oauthOn = Boolean(overview?.features?.oauthEnabled);
     if (!oauthOn) {
-      for (const id of [...oauthPollTimers.keys()]) stopOAuthPolling(id);
+      stopAllOAuthPolling();
       state.oauthPendingById = {};
       return;
     }
@@ -755,7 +762,9 @@ export async function mount(root, api) {
 
   function restoreFocusState(focusInfo) {
     if (!focusInfo) return;
-    const target = rootEl.querySelector(`[data-keep-focus="${focusInfo.key}"]`);
+    const target = Array.from(rootEl.querySelectorAll("[data-keep-focus]")).find(
+      (el) => el.getAttribute("data-keep-focus") === focusInfo.key,
+    );
     if (!target) return;
     target.focus({ preventScroll: true });
     if (focusInfo.start !== null && focusInfo.end !== null && typeof target.setSelectionRange === "function") {
@@ -817,7 +826,7 @@ export async function mount(root, api) {
 
   return () => {
     clearInterval(pollTimer);
-    for (const id of [...oauthPollTimers.keys()]) stopOAuthPolling(id);
+    stopAllOAuthPolling();
     unsubLocale();
     unsubTheme();
     root.replaceChildren();

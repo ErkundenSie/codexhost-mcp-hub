@@ -45,7 +45,7 @@ function vscodeDefaultPath(home, platform) {
  * as written natively by VS Code `mcp.json`.
  */
 export function parseJsonc(text) {
-  const src = String(text ?? "");
+  const src = String(text ?? "").replace(/^\uFEFF/, "");
   let stripped = "";
   let inString = false;
   let escaped = false;
@@ -108,6 +108,12 @@ export function parseJsonc(text) {
   }
 
   return JSON.parse(clean);
+}
+
+function parseTargetJson(text, format) {
+  const trimmed = text.replace(/^\uFEFF/, "").trim();
+  if (!trimmed) return {};
+  return format === "vscode-json" ? parseJsonc(trimmed) : JSON.parse(trimmed);
 }
 
 /**
@@ -610,13 +616,23 @@ export async function readTargetConfig(target) {
   }
 
   if (target.format === "codex-toml") {
-    return {
-      exists: true,
-      detected: true,
-      servers: parseCodexMcpServers(rawText),
-      rawText,
-      error: null,
-    };
+    try {
+      return {
+        exists: true,
+        detected: true,
+        servers: parseCodexMcpServers(rawText),
+        rawText,
+        error: null,
+      };
+    } catch (err) {
+      return {
+        exists: true,
+        detected: true,
+        servers: {},
+        rawText,
+        error: err instanceof Error ? err.message : String(err),
+      };
+    }
   }
 
   if (target.format === "dsh-cordis-yaml") {
@@ -661,8 +677,7 @@ export async function readTargetConfig(target) {
 
   // JSON / JSONC formats
   try {
-    const trimmed = rawText.trim();
-    const doc = trimmed ? (target.format === "vscode-json" ? parseJsonc(trimmed) : JSON.parse(trimmed)) : {};
+    const doc = parseTargetJson(rawText, target.format);
     if (!doc || typeof doc !== "object" || Array.isArray(doc)) {
       return {
         exists: true,
@@ -730,13 +745,9 @@ export async function applyTargetMutations(target, upserts, removals) {
   } else if (target.format === "hermes-yaml") {
     nextText = updateHermesYaml(originalText, upserts, removals);
   } else if (target.format === "zcode-json") {
-    const trimmed = originalText.trim();
-    let doc = {};
-    if (trimmed) {
-      doc = JSON.parse(trimmed);
-      if (!doc || typeof doc !== "object" || Array.isArray(doc)) {
-        throw new Error(`Refusing to overwrite non-object JSON file: ${filePath}`);
-      }
+    const doc = parseTargetJson(originalText, target.format);
+    if (!doc || typeof doc !== "object" || Array.isArray(doc)) {
+      throw new Error(`Refusing to overwrite non-object JSON file: ${filePath}`);
     }
     const existingMcp =
       doc.mcp && typeof doc.mcp === "object" && !Array.isArray(doc.mcp) ? { ...doc.mcp } : {};
@@ -753,13 +764,9 @@ export async function applyTargetMutations(target, upserts, removals) {
     const nextDoc = { ...doc, mcp: { ...existingMcp, servers: section } };
     nextText = JSON.stringify(nextDoc, null, 2) + "\n";
   } else {
-    const trimmed = originalText.trim();
-    let doc = {};
-    if (trimmed) {
-      doc = target.format === "vscode-json" ? parseJsonc(trimmed) : JSON.parse(trimmed);
-      if (!doc || typeof doc !== "object" || Array.isArray(doc)) {
-        throw new Error(`Refusing to overwrite non-object JSON file: ${filePath}`);
-      }
+    const doc = parseTargetJson(originalText, target.format);
+    if (!doc || typeof doc !== "object" || Array.isArray(doc)) {
+      throw new Error(`Refusing to overwrite non-object JSON file: ${filePath}`);
     }
     const rootKey = target.rootKey || "mcpServers";
     const section =

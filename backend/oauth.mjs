@@ -304,6 +304,13 @@ export class OAuthManager {
     this._autoRefreshRunning = false;
     /** @type {Record<string, object> | null} */
     this._cache = null;
+    this._tokenMutex = Promise.resolve();
+  }
+
+  _withTokenLock(fn) {
+    const next = this._tokenMutex.then(fn, fn);
+    this._tokenMutex = next.then(() => undefined, () => undefined);
+    return next;
   }
 
   async _loadTokens() {
@@ -327,43 +334,45 @@ export class OAuthManager {
   }
 
   async migrateLegacyTokens(servers) {
-    const tokens = await this._loadTokens();
-    const legacyKeys = Object.keys(tokens).filter((k) => !k.startsWith("card:"));
-    if (legacyKeys.length === 0 || !Array.isArray(servers) || servers.length === 0) {
-      return false;
-    }
-    let changed = false;
-    for (const legacyKey of legacyKeys) {
-      const record = tokens[legacyKey];
-      if (!record || !record.accessToken) continue;
-      const matches = servers.filter((s) => {
-        if (!s?.id || !s.transport?.url) return false;
-        if (s.transport.type !== "http" && s.transport.type !== "sse") return false;
-        if (tokens[`card:${s.id}`]) return false;
-        try {
-          return normalizeOAuthServerKey(s.transport.url) === legacyKey;
-        } catch {
-          return false;
-        }
-      });
-      if (matches.length === 0) continue;
-      // Prefer a card already using OAuth header sync, else unaliased primary card, else first match
-      const chosen =
-        matches.find((s) => s.oauthHeaderManaged) ||
-        matches.find((s) => !s.alias) ||
-        matches[0];
-      tokens[`card:${chosen.id}`] = {
-        ...record,
-        serverId: chosen.id,
-        serverUrl: record.serverUrl || chosen.transport.url,
-      };
-      delete tokens[legacyKey];
-      changed = true;
-    }
-    if (changed) {
-      await this._saveTokens(tokens);
-    }
-    return changed;
+    return this._withTokenLock(async () => {
+      const tokens = await this._loadTokens();
+      const legacyKeys = Object.keys(tokens).filter((k) => !k.startsWith("card:"));
+      if (legacyKeys.length === 0 || !Array.isArray(servers) || servers.length === 0) {
+        return false;
+      }
+      let changed = false;
+      for (const legacyKey of legacyKeys) {
+        const record = tokens[legacyKey];
+        if (!record || !record.accessToken) continue;
+        const matches = servers.filter((s) => {
+          if (!s?.id || !s.transport?.url) return false;
+          if (s.transport.type !== "http" && s.transport.type !== "sse") return false;
+          if (tokens[`card:${s.id}`]) return false;
+          try {
+            return normalizeOAuthServerKey(s.transport.url) === legacyKey;
+          } catch {
+            return false;
+          }
+        });
+        if (matches.length === 0) continue;
+        // Prefer a card already using OAuth header sync, else unaliased primary card, else first match
+        const chosen =
+          matches.find((s) => s.oauthHeaderManaged) ||
+          matches.find((s) => !s.alias) ||
+          matches[0];
+        tokens[`card:${chosen.id}`] = {
+          ...record,
+          serverId: chosen.id,
+          serverUrl: record.serverUrl || chosen.transport.url,
+        };
+        delete tokens[legacyKey];
+        changed = true;
+      }
+      if (changed) {
+        await this._saveTokens(tokens);
+      }
+      return changed;
+    });
   }
 
   _findRecord(tokens, serverUrl, serverId = null) {
@@ -509,25 +518,28 @@ export class OAuthManager {
     }
     const expiresIn = Number(res.json.expires_in);
     const expiresAt = Number.isFinite(expiresIn) && expiresIn > 0 ? Date.now() + expiresIn * 1000 : null;
-    const tokens = await this._loadTokens();
-    const storageKey = makeOAuthTokenKey(sess.serverId, sess.serverUrl);
-    tokens[storageKey] = {
-      serverId: sess.serverId || "",
-      serverUrl: sess.serverUrl,
-      accessToken: res.json.access_token,
-      refreshToken: typeof res.json.refresh_token === "string" ? res.json.refresh_token : "",
-      tokenType: typeof res.json.token_type === "string" && res.json.token_type.trim()
-        ? res.json.token_type.trim()
-        : "Bearer",
-      expiresAt,
-      scope: typeof res.json.scope === "string" ? res.json.scope : sess.scope || "",
-      tokenEndpoint: sess.tokenEndpoint,
-      clientId: sess.clientId,
-      clientSecret: sess.clientSecret || "",
-      resource: sess.resource || "",
-      obtainedAt: new Date().toISOString(),
-    };
-    await this._saveTokens(tokens);
+    await this._withTokenLock(async () => {
+      const tokens = await this._loadTokens();
+      const storageKey = makeOAuthTokenKey(sess.serverId, sess.serverUrl);
+      tokens[storageKey] = {
+        serverId: sess.serverId || "",
+        serverUrl: sess.serverUrl,
+        accessToken: res.json.access_token,
+        refreshToken: typeof res.json.refresh_token === "string" ? res.json.refresh_token : "",
+        tokenType:
+          typeof res.json.token_type === "string" && res.json.token_type.trim()
+            ? res.json.token_type.trim()
+            : "Bearer",
+        expiresAt,
+        scope: typeof res.json.scope === "string" ? res.json.scope : sess.scope || "",
+        tokenEndpoint: sess.tokenEndpoint,
+        clientId: sess.clientId,
+        clientSecret: sess.clientSecret || "",
+        resource: sess.resource || "",
+        obtainedAt: new Date().toISOString(),
+      };
+      await this._saveTokens(tokens);
+    });
   }
 
   async startLogin(server, timeoutMs = 5000) {
@@ -754,20 +766,31 @@ export class OAuthManager {
           ? res.json.token_type.trim()
           : record.tokenType || "Bearer";
       const resolvedServerId = (typeof serverId === "string" && serverId.trim()) || record.serverId || "";
-      tokens[actualKey] = {
-        ...record,
-        serverId: resolvedServerId,
-        accessToken: res.json.access_token,
-        refreshToken:
-          typeof res.json.refresh_token === "string" && res.json.refresh_token
-            ? res.json.refresh_token
-            : record.refreshToken,
-        tokenType: nextTokenType,
-        expiresAt,
-        scope: typeof res.json.scope === "string" ? res.json.scope : record.scope || "",
-        obtainedAt: new Date().toISOString(),
-      };
-      await this._saveTokens(tokens);
+      const saved = await this._withTokenLock(async () => {
+        const latestTokens = await this._loadTokens();
+        // Do not resurrect a token that was concurrently logged out or deleted while refresh was in flight
+        if (!(actualKey in latestTokens)) {
+          return false;
+        }
+        latestTokens[actualKey] = {
+          ...latestTokens[actualKey],
+          serverId: resolvedServerId,
+          accessToken: res.json.access_token,
+          refreshToken:
+            typeof res.json.refresh_token === "string" && res.json.refresh_token
+              ? res.json.refresh_token
+              : latestTokens[actualKey].refreshToken || record.refreshToken,
+          tokenType: nextTokenType,
+          expiresAt,
+          scope: typeof res.json.scope === "string" ? res.json.scope : record.scope || "",
+          obtainedAt: new Date().toISOString(),
+        };
+        await this._saveTokens(latestTokens);
+        return true;
+      });
+      if (!saved) {
+        throw new Error("OAuth token was cleared while refresh was in flight");
+      }
       this.onChange?.();
       return {
         status: await this.getPublicStatus(serverUrl, resolvedServerId || null),
@@ -882,36 +905,40 @@ export class OAuthManager {
   }
 
   async logout(serverUrl, serverId = null) {
-    const tokens = await this._loadTokens();
-    const id = typeof serverId === "string" ? serverId.trim() : "";
-    let removed = false;
-    if (id && `card:${id}` in tokens) {
-      delete tokens[`card:${id}`];
-      removed = true;
-    } else if (!id) {
-      const key = normalizeOAuthServerKey(serverUrl);
-      if (key in tokens) {
-        delete tokens[key];
+    return this._withTokenLock(async () => {
+      const tokens = await this._loadTokens();
+      const id = typeof serverId === "string" ? serverId.trim() : "";
+      let removed = false;
+      if (id && `card:${id}` in tokens) {
+        delete tokens[`card:${id}`];
         removed = true;
+      } else if (!id) {
+        const key = normalizeOAuthServerKey(serverUrl);
+        if (key in tokens) {
+          delete tokens[key];
+          removed = true;
+        }
       }
-    }
-    if (removed) {
-      await this._saveTokens(tokens);
-      this.onChange?.();
-    }
-    return { ok: true };
+      if (removed) {
+        await this._saveTokens(tokens);
+        this.onChange?.();
+      }
+      return { ok: true };
+    });
   }
 
   async deleteCardToken(serverId) {
     const id = typeof serverId === "string" ? serverId.trim() : "";
     if (!id) return { ok: true };
-    const tokens = await this._loadTokens();
-    if (`card:${id}` in tokens) {
-      delete tokens[`card:${id}`];
-      await this._saveTokens(tokens);
-      this.onChange?.();
-    }
-    return { ok: true };
+    return this._withTokenLock(async () => {
+      const tokens = await this._loadTokens();
+      if (`card:${id}` in tokens) {
+        delete tokens[`card:${id}`];
+        await this._saveTokens(tokens);
+        this.onChange?.();
+      }
+      return { ok: true };
+    });
   }
 
   dispose() {

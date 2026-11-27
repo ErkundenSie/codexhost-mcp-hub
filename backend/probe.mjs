@@ -3,16 +3,27 @@
  * Respects CodexHost's 10s backend IPC timeout and stays free of subprocess spawns.
  */
 
+import { readFileSync } from "node:fs";
 import { access } from "node:fs/promises";
 import path from "node:path";
 
 const MAX_DISCOVERED_TOOLS = 60;
 const MAX_TOOL_DESC_LEN = 240;
 
+function readClientVersion() {
+  try {
+    const { version } = JSON.parse(readFileSync(new URL("../manifest.json", import.meta.url), "utf8"));
+    if (typeof version === "string" && version.trim()) return version.trim();
+  } catch {
+    // The probe can also run without a readable extension manifest.
+  }
+  return "0.0.0";
+}
+
 const INIT_PARAMS = {
   protocolVersion: "2024-11-05",
   capabilities: {},
-  clientInfo: { name: "codexhost-mcp-hub", version: "2.5.4" },
+  clientInfo: { name: "codexhost-mcp-hub", version: readClientVersion() },
 };
 
 function isLocalAbsolutePath(value) {

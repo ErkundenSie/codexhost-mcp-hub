@@ -511,17 +511,18 @@ export function createHubController({
       return publicDiff;
     });
 
-    const targetMap = new Map(targets.map((t) => [t.id, t]));
     const nativeLookupByTarget = new Map(
       targets.map((t) => [t.id, new Map(t.nativeServers.map((s) => [s.name, s]))]),
     );
 
     // Track URLs where at least one card is already OAuth-authenticated so sibling accounts always know login is supported
     const oauthAuthedUrlKeys = new Set();
+    const oauthStatusesByServerId = new Map();
     if (oauthEnabled) {
       for (const s of state.servers) {
         if (!s?.transport?.url || (s.transport.type !== "http" && s.transport.type !== "sse")) continue;
         const st = await oauth.getPublicStatus(s.transport.url, s.id);
+        oauthStatusesByServerId.set(s.id, st);
         if (st?.authenticated) {
           try {
             oauthAuthedUrlKeys.add(normalizeOAuthServerKey(s.transport.url));
@@ -532,90 +533,85 @@ export function createHubController({
       }
     }
 
-    const enrichedServers = await Promise.all(
-      state.servers.map(async (s) => {
-        const builtin = detectBuiltinMcp(s.name, s.transport);
-        const targetStatuses = {};
-        for (const tg of targets) {
-          const native = nativeLookupByTarget.get(tg.id)?.get(s.name);
-          const ownerId = getManagedOwnerId(state, tg.id, s.name);
-          const selected = s.enabled && Array.isArray(s.targets) && s.targets.includes(tg.id);
-          const siblingWantsTarget = state.servers.some(
-            (other) =>
-              other.id !== s.id &&
-              other.name === s.name &&
-              other.enabled &&
-              Array.isArray(other.targets) &&
-              other.targets.includes(tg.id),
-          );
-          if (selected) {
-            if (!native) {
-              targetStatuses[tg.id] = "pending-add";
-            } else if (
-              transportSignature(native.transport) !== transportSignature(s.transport) ||
-              native.enabled === false
-            ) {
-              targetStatuses[tg.id] = "pending-update";
-            } else {
-              targetStatuses[tg.id] = "synced";
-            }
+    const enrichedServers = state.servers.map((s) => {
+      const builtin = detectBuiltinMcp(s.name, s.transport);
+      const targetStatuses = {};
+      for (const tg of targets) {
+        const native = nativeLookupByTarget.get(tg.id)?.get(s.name);
+        const ownerId = getManagedOwnerId(state, tg.id, s.name);
+        const selected = s.enabled && Array.isArray(s.targets) && s.targets.includes(tg.id);
+        const siblingWantsTarget = state.servers.some(
+          (other) =>
+            other.id !== s.id &&
+            other.name === s.name &&
+            other.enabled &&
+            Array.isArray(other.targets) &&
+            other.targets.includes(tg.id),
+        );
+        if (selected) {
+          if (!native) {
+            targetStatuses[tg.id] = "pending-add";
           } else if (
-            ownerId === s.id &&
-            !siblingWantsTarget &&
-            native &&
-            tg.enabled &&
-            !(native.isBuiltin && (!native.builtinOwnerTargetId || native.builtinOwnerTargetId === tg.id))
+            transportSignature(native.transport) !== transportSignature(s.transport) ||
+            native.enabled === false
           ) {
-            targetStatuses[tg.id] = "pending-remove";
+            targetStatuses[tg.id] = "pending-update";
           } else {
-            targetStatuses[tg.id] = "off";
+            targetStatuses[tg.id] = "synced";
           }
+        } else if (
+          ownerId === s.id &&
+          !siblingWantsTarget &&
+          native &&
+          tg.enabled &&
+          !(native.isBuiltin && (!native.builtinOwnerTargetId || native.builtinOwnerTargetId === tg.id))
+        ) {
+          targetStatuses[tg.id] = "pending-remove";
+        } else {
+          targetStatuses[tg.id] = "off";
         }
-        const isUrlTransport = s.transport?.type === "http" || s.transport?.type === "sse";
-        const isLoopback = isCodexhostLoopbackServer(s.name, s.transport);
-        const oauthStatus =
-          oauthEnabled && isUrlTransport && s.transport?.url
-            ? await oauth.getPublicStatus(s.transport.url, s.id)
-            : null;
-        const oauthPending =
-          oauthEnabled && isUrlTransport ? oauth.getPendingStatus(s.id) : null;
-        let oauthAuthHint = null;
-        let needsAuthCheck = false;
-        if (oauthEnabled && isUrlTransport && s.transport?.url && !isLoopback) {
-          try {
-            const urlKey = normalizeOAuthServerKey(s.transport.url);
-            const cached = state.authHintsByUrl?.[urlKey];
-            if (oauthAuthedUrlKeys.has(urlKey)) {
-              oauthAuthHint = {
-                needsAuth: true,
-                status: Number(cached?.status) || 401,
-              };
-            } else if (cached && typeof cached === "object") {
-              oauthAuthHint = {
-                needsAuth: Boolean(cached.needsAuth),
-                status: Number(cached.status) || (cached.needsAuth ? 401 : 200),
-              };
-            } else if (!oauthStatus?.authenticated && !sessionFailedAuthProbeUrls.has(urlKey)) {
-              needsAuthCheck = true;
-            }
-          } catch {
-            // Ignore malformed URLs
+      }
+      const isUrlTransport = s.transport?.type === "http" || s.transport?.type === "sse";
+      const isLoopback = isCodexhostLoopbackServer(s.name, s.transport);
+      const oauthStatus = oauthStatusesByServerId.get(s.id) ?? null;
+      const oauthPending =
+        oauthEnabled && isUrlTransport ? oauth.getPendingStatus(s.id) : null;
+      let oauthAuthHint = null;
+      let needsAuthCheck = false;
+      if (oauthEnabled && isUrlTransport && s.transport?.url && !isLoopback) {
+        try {
+          const urlKey = normalizeOAuthServerKey(s.transport.url);
+          const cached = state.authHintsByUrl?.[urlKey];
+          if (oauthAuthedUrlKeys.has(urlKey)) {
+            oauthAuthHint = {
+              needsAuth: true,
+              status: Number(cached?.status) || 401,
+            };
+          } else if (cached && typeof cached === "object") {
+            oauthAuthHint = {
+              needsAuth: Boolean(cached.needsAuth),
+              status: Number(cached.status) || (cached.needsAuth ? 401 : 200),
+            };
+          } else if (!oauthStatus?.authenticated && !sessionFailedAuthProbeUrls.has(urlKey)) {
+            needsAuthCheck = true;
           }
+        } catch {
+          // Ignore malformed URLs
         }
-        return {
-          ...s,
-          alias: typeof s.alias === "string" ? s.alias : "",
-          isLoopback,
-          isBuiltin: builtin.isBuiltin,
-          builtinVendor: builtin.vendor,
-          targetStatuses,
-          oauth: oauthStatus,
-          oauthPending: oauthPending && oauthPending.status !== "idle" ? oauthPending : null,
-          oauthAuthHint,
-          needsAuthCheck,
-        };
-      }),
-    );
+      }
+      return {
+        ...s,
+        alias: typeof s.alias === "string" ? s.alias : "",
+        isLoopback,
+        isBuiltin: builtin.isBuiltin,
+        builtinVendor: builtin.vendor,
+        targetStatuses,
+        oauth: oauthStatus,
+        oauthPending: oauthPending && oauthPending.status !== "idle" ? oauthPending : null,
+        oauthAuthHint,
+        needsAuthCheck,
+      };
+    });
 
     const syncedCountOf = (srv) =>
       Object.values(srv.targetStatuses ?? {}).filter((st) => st === "synced").length;
@@ -662,7 +658,6 @@ export function createHubController({
         newImportableCount: importCandidates.filter((c) => !c.alreadyInHub).length,
         lastSyncedAt: state.lastSyncedAt,
       },
-      _hasTargetCount: targetMap.size,
     };
   }
 
@@ -1667,14 +1662,15 @@ export function createHubController({
   async function restoreBackup({ backupId }) {
     return serialize(async () => {
       const state = await store.load();
-      const safeBackupId = String(backupId ?? "").trim();
-      const targetMatch = resolveTargets(state).find((t) => {
-        const safeId = t.id.replace(/[^a-zA-Z0-9_-]/g, "_");
-        return safeBackupId.endsWith(`_${safeId}`);
+      const targets = resolveTargets(state);
+      const meta = await store.restoreBackup(backupId, {
+        beforeRestore: ({ targetId }) => {
+          if (targets.some((t) => t.id === targetId)) {
+            watcher.markSelfWrite(targetId, 1800);
+          }
+        },
       });
-      if (targetMatch) watcher.markSelfWrite(targetMatch.id, 1800);
-      const meta = await store.restoreBackup(backupId);
-      const restoredTarget = resolveTargets(state).find((t) => t.id === meta.targetId);
+      const restoredTarget = targets.find((t) => t.id === meta.targetId);
       if (restoredTarget) {
         await refreshBaselineForTarget(restoredTarget);
         watcher.markSelfWrite(restoredTarget.id, 1800);
@@ -1802,7 +1798,36 @@ export function createHubController({
       const autoBackup = settings.autoBackup !== false;
       const now = new Date().toISOString();
       const mcpAllowSet = cfg.mcpScope === "selected" ? new Set(cfg.selectedMcpNames) : null;
-      const candidateDestIds = cfg.targetIds.filter((id) => id !== sourceTargetId);
+      const plansByDestId = new Map();
+      for (const destId of cfg.targetIds) {
+        if (destId === sourceTargetId) continue;
+        const target = targetById.get(destId);
+        const scan = scanById.get(destId);
+        if (!target || !scan || scan.error) continue;
+        plansByDestId.set(destId, {
+          target,
+          exists: scan.exists,
+          nativeByName: new Map(scan.nativeServers.map((ns) => [ns.name, ns])),
+          upserts: Object.create(null),
+          removals: [],
+          changes: [],
+        });
+      }
+
+      const logs = [];
+      const planLog = (action, mcpName, detail = "") => {
+        const log = {
+          action,
+          mcpName,
+          sourceTargetId,
+          sourceName: sourceTarget.shortName || sourceTarget.name,
+          destNames: [],
+          status: "synced",
+          detail,
+        };
+        logs.push(log);
+        return log;
+      };
 
       let propagated = 0;
       let stateDirty = false;
@@ -1849,38 +1874,12 @@ export function createHubController({
         for (const { name, entry } of added) {
           if (mcpAllowSet && !mcpAllowSet.has(name)) continue;
           const hubSrv = findOrCreateHubServer(name, entry, null);
-          const destNames = [];
-          for (const destId of candidateDestIds) {
-            const destTarget = targetById.get(destId);
-            const destScan = scanById.get(destId);
-            if (!destTarget || !destScan || destScan.error) continue;
-            const destNative = destScan.nativeServers.find((ns) => ns.name === name);
-            if (destNative) {
-              // Do not clobber an existing differently-configured same-name MCP on add
-              continue;
-            }
-            try {
-              if (destScan.exists) await backupTargetIfNeeded(destTarget, autoBackup);
-              await writeTargetSafe(destTarget, { [name]: hubSrv }, []);
-              setManagedOwner(state, destId, name, hubSrv.id);
-              hubSrv.targets = [...new Set([...(hubSrv.targets ?? []), destId])];
-              destNames.push(destTarget.shortName || destTarget.name);
-              propagated++;
-              stateDirty = true;
-            } catch {
-              // Skip failing target without stopping other targets
-            }
-          }
-          if (destNames.length > 0) {
-            pushAutoSyncLog({
-              action: "add",
-              mcpName: name,
-              sourceTargetId,
-              sourceName: sourceTarget.shortName || sourceTarget.name,
-              destNames,
-              status: "synced",
-              detail: "",
-            });
+          const log = planLog("add", name);
+          for (const plan of plansByDestId.values()) {
+            // Do not clobber an existing differently-configured same-name MCP on add
+            if (plan.nativeByName.has(name)) continue;
+            plan.upserts[name] = hubSrv;
+            plan.changes.push({ hubSrv, log });
           }
         }
       }
@@ -1890,12 +1889,9 @@ export function createHubController({
         for (const { name, entry, prev } of updated) {
           if (mcpAllowSet && !mcpAllowSet.has(name)) continue;
           const hubSrv = findOrCreateHubServer(name, entry, prev.sig);
-          const destNames = [];
-          for (const destId of candidateDestIds) {
-            const destTarget = targetById.get(destId);
-            const destScan = scanById.get(destId);
-            if (!destTarget || !destScan || destScan.error) continue;
-            const destNative = destScan.nativeServers.find((ns) => ns.name === name);
+          const log = planLog("update", name, cfg.updateScope);
+          for (const [destId, plan] of plansByDestId) {
+            const destNative = plan.nativeByName.get(name);
             const destOwnerId = getManagedOwnerId(state, destId, name);
             // Respect intentional same-name variant isolation
             if (destOwnerId && destOwnerId !== hubSrv.id) continue;
@@ -1905,33 +1901,13 @@ export function createHubController({
             }
             if (
               destNative &&
-              destNative.enabled !== false &&
+              (destNative.enabled !== false) === (entry.enabled !== false) &&
               transportSignature(destNative.transport) === entry.sig
             ) {
               continue;
             }
-            try {
-              if (destScan.exists) await backupTargetIfNeeded(destTarget, autoBackup);
-              await writeTargetSafe(destTarget, { [name]: hubSrv }, []);
-              setManagedOwner(state, destId, name, hubSrv.id);
-              hubSrv.targets = [...new Set([...(hubSrv.targets ?? []), destId])];
-              destNames.push(destTarget.shortName || destTarget.name);
-              propagated++;
-              stateDirty = true;
-            } catch {
-              // Skip failing target without stopping other targets
-            }
-          }
-          if (destNames.length > 0) {
-            pushAutoSyncLog({
-              action: "update",
-              mcpName: name,
-              sourceTargetId,
-              sourceName: sourceTarget.shortName || sourceTarget.name,
-              destNames,
-              status: "synced",
-              detail: cfg.updateScope === "existing-only" ? "existing-only" : "all-selected",
-            });
+            plan.upserts[name] = hubSrv;
+            plan.changes.push({ hubSrv, log });
           }
         }
       }
@@ -1950,12 +1926,9 @@ export function createHubController({
             hubSrv.targets = (hubSrv.targets ?? []).filter((id) => id !== sourceTargetId);
             stateDirty = true;
           }
-          const destNames = [];
-          for (const destId of candidateDestIds) {
-            const destTarget = targetById.get(destId);
-            const destScan = scanById.get(destId);
-            if (!destTarget || !destScan || destScan.error) continue;
-            const destNative = destScan.nativeServers.find((ns) => ns.name === name);
+          const log = planLog("remove", name);
+          for (const [destId, plan] of plansByDestId) {
+            const destNative = plan.nativeByName.get(name);
             if (!destNative) continue;
             if (
               destNative.isBuiltin &&
@@ -1965,31 +1938,41 @@ export function createHubController({
             }
             const destOwnerId = getManagedOwnerId(state, destId, name);
             if (hubSrv && destOwnerId && destOwnerId !== hubSrv.id) continue;
-            try {
-              if (destScan.exists) await backupTargetIfNeeded(destTarget, autoBackup);
-              await writeTargetSafe(destTarget, {}, [name]);
-              clearManagedOwner(state, destId, name);
-              if (hubSrv) {
-                hubSrv.targets = (hubSrv.targets ?? []).filter((id) => id !== destId);
-              }
-              destNames.push(destTarget.shortName || destTarget.name);
-              propagated++;
-              stateDirty = true;
-            } catch {
-              // Skip failing target
+            plan.removals.push(name);
+            plan.changes.push({ hubSrv, log });
+          }
+        }
+      }
+
+      for (const [destId, { target, exists, upserts, removals, changes }] of plansByDestId) {
+        if (changes.length === 0) continue;
+        try {
+          if (exists) await backupTargetIfNeeded(target, autoBackup);
+          await writeTargetSafe(target, upserts, removals);
+        } catch {
+          // Skip failing target without stopping other targets
+          continue;
+        }
+        for (const { hubSrv, log } of changes) {
+          const name = log.mcpName;
+          if (log.action === "remove") {
+            clearManagedOwner(state, destId, name);
+            if (hubSrv) {
+              hubSrv.targets = (hubSrv.targets ?? []).filter((id) => id !== destId);
             }
+          } else {
+            setManagedOwner(state, destId, name, hubSrv.id);
+            hubSrv.targets = [...new Set([...(hubSrv.targets ?? []), destId])];
           }
-          if (destNames.length > 0) {
-            pushAutoSyncLog({
-              action: "remove",
-              mcpName: name,
-              sourceTargetId,
-              sourceName: sourceTarget.shortName || sourceTarget.name,
-              destNames,
-              status: "synced",
-              detail: "",
-            });
-          }
+          log.destNames.push(target.shortName || target.name);
+          propagated++;
+        }
+        stateDirty = true;
+      }
+
+      for (const log of logs) {
+        if (log.destNames.length > 0) {
+          pushAutoSyncLog(log);
         }
       }
 

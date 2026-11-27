@@ -5,7 +5,7 @@
     "en": "MCP Sync Hub",
     "zh-CN": "MCP 统一中心"
   },
-  "version": "2.5.6",
+  "version": "2.5.7",
   "description": {
     "en": "Unified MCP manager for 24 built-in local AI targets (100% CodexHost Harness coverage + VS Code) with built-in OAuth 2.1 multi-account sign-in, auto token refresh, tool discovery, and real-time config sync.",
     "zh-CN": "覆盖 24 个内置 AI 配置目标（100% 覆盖 CodexHost 全部 20 个 Harness + VS Code）的统一 MCP 管理中心：支持内置 OAuth 2.1 多账户统一登录与后台续期、工具列表探测、同名聚合单卡与实时自动同步。"

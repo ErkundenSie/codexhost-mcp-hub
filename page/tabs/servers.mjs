@@ -820,12 +820,8 @@ export function renderServersTab(ctx) {
                   onClick: async () => {
                     let next;
                     if (!server.enabled) {
-                      const currentlySynced = managed
-                        .filter((x) =>
-                          x.nativeServers.some((ns) => ns.name === server.name && ns.enabled !== false),
-                        )
-                        .map((x) => x.id);
-                      next = [...new Set([...currentlySynced, tg.id])];
+                      const ownTargets = Array.isArray(server.targets) ? server.targets : [];
+                      next = [...new Set([...ownTargets, tg.id])];
                     } else {
                       next = selected
                         ? (server.targets ?? []).filter((id) => id !== tg.id)

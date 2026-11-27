@@ -200,12 +200,13 @@ export function parseCodexMcpServers(tomlText) {
   let currentPath = [];
 
   for (let idx = 0; idx < lines.length; idx++) {
-    let line = stripInlineComment(lines[idx]).trim();
+    const { text: line, end } = readTomlStatement(lines, idx);
+    idx = end;
     if (!line) continue;
 
-    // Table header: [section.name] (skip array-of-tables [[...]])
-    if (line.startsWith("[") && !line.startsWith("[[") && line.endsWith("]")) {
-      currentPath = parseTomlHeaderPath(line.slice(1, -1));
+    if (line.startsWith("[")) {
+      // Skip array-of-tables and leave the previous MCP section.
+      currentPath = line.startsWith("[[") ? [] : parseTomlHeaderPath(line.slice(1, -1));
       if (currentPath[0] === "mcp_servers" && currentPath.length >= 2) {
         const serverName = currentPath[1];
         rawMap[serverName] ??= {};
@@ -218,23 +219,14 @@ export function parseCodexMcpServers(tomlText) {
 
     if (currentPath[0] !== "mcp_servers" || currentPath.length < 2) continue;
 
-    // Handle multi-line arrays like args = [\n  "...",\n]
-    let eq = findTopLevelChar(line, "=");
+    const eq = findTopLevelChar(line, "=");
     if (eq === -1) continue;
-    let rawVal = line.slice(eq + 1).trim();
-    while (
-      idx + 1 < lines.length &&
-      hasUnclosedBracket(rawVal)
-    ) {
-      idx++;
-      rawVal += " " + stripInlineComment(lines[idx]).trim();
-    }
 
     const keySegments = parseTomlHeaderPath(line.slice(0, eq));
     const key = keySegments[0];
     if (!key) continue;
 
-    const val = parseTomlValue(rawVal);
+    const val = parseTomlValue(line.slice(eq + 1));
     const serverName = currentPath[1];
     rawMap[serverName] ??= {};
     if (currentPath.length === 2) {
@@ -280,30 +272,63 @@ export function parseCodexMcpServers(tomlText) {
   return servers;
 }
 
-function hasUnclosedBracket(str) {
-  let inDouble = false;
-  let inSingle = false;
-  let escaped = false;
-  let sq = 0;
-  let curly = 0;
-  for (let i = 0; i < str.length; i++) {
-    const ch = str[i];
-    if (inDouble) {
-      if (escaped) escaped = false;
-      else if (ch === "\\") escaped = true;
-      else if (ch === '"') inDouble = false;
-    } else if (inSingle) {
-      if (ch === "'") inSingle = false;
-    } else {
-      if (ch === '"') inDouble = true;
-      else if (ch === "'") inSingle = true;
-      else if (ch === "[") sq++;
-      else if (ch === "]") sq--;
-      else if (ch === "{") curly++;
-      else if (ch === "}") curly--;
+// Check delimiters across logical statements without treating comments or string
+// contents as syntax. Full TOML value validation is outside this parser's scope.
+function readTomlStatement(lines, start) {
+  const header = lines[start].trimStart().startsWith("[");
+  const closing = [];
+  const parts = [];
+  let quote = "";
+  const fail = (line, detail) => {
+    throw new Error(`TOML parse error at line ${line + 1}: ${detail}`);
+  };
+
+  for (let end = start; end < lines.length; end++) {
+    const line = lines[end];
+    let i = 0;
+    while (i < line.length) {
+      const ch = line[i];
+      if (quote) {
+        if (quote[0] === '"' && ch === "\\") {
+          i += 2;
+          continue;
+        }
+        if (line.startsWith(quote, i)) {
+          i += quote.length;
+          if (quote.length === 3) {
+            // A closing triple quote can be preceded by up to two literal quotes.
+            for (let extra = 0; extra < 2 && line[i] === quote[0]; extra++) i++;
+          }
+          quote = "";
+          continue;
+        }
+      } else if (ch === "#") {
+        break;
+      } else if (ch === '"' || ch === "'") {
+        quote = line.startsWith(ch.repeat(3), i) ? ch.repeat(3) : ch;
+        i += quote.length;
+        continue;
+      } else if (ch === "[" || ch === "{") {
+        closing.push(ch === "[" ? "]" : "}");
+      } else if ((ch === "]" || ch === "}") && closing.pop() !== ch) {
+        fail(end, `unexpected "${ch}"`);
+      }
+      i++;
     }
+
+    if (quote.length === 1 || (header && quote)) fail(end, "unclosed quoted string");
+    parts.push(line.slice(0, i));
+    if (header) {
+      const text = parts[0].trim();
+      if (closing.length || !text.endsWith(text.startsWith("[[") ? "]]" : "]")) {
+        fail(end, "malformed section header");
+      }
+      return { text, end };
+    }
+    if (!quote && closing.length === 0) return { text: parts.join("\n").trim(), end };
   }
-  return sq > 0 || curly > 0;
+
+  fail(start, quote ? "unclosed multiline string" : `missing closing "${closing.at(-1)}"`);
 }
 
 /**

@@ -179,15 +179,20 @@ export class HubStore {
     }
   }
 
-  async restoreBackup(backupId) {
+  async readBackupMeta(backupId) {
     const safeId = String(backupId ?? "").trim();
-    if (!safeId || safeId.includes("/") || safeId.includes("\\") || safeId.includes("..")) {
+    if (!/^[a-zA-Z0-9_-]+$/.test(safeId)) {
       throw new Error("Invalid backup ID");
     }
     const metaPath = path.join(this.backupsDir, `${safeId}.meta.json`);
-    const meta = JSON.parse(await readFile(metaPath, "utf8"));
+    return JSON.parse(await readFile(metaPath, "utf8"));
+  }
+
+  async restoreBackup(backupId, { beforeRestore } = {}) {
+    const meta = await this.readBackupMeta(backupId);
     const payloadPath = path.join(this.backupsDir, path.basename(meta.payloadFile));
     const content = await readFile(payloadPath, "utf8");
+    beforeRestore?.(meta);
     await atomicWriteText(meta.configPath, content);
     return meta;
   }

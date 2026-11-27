@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
+import { readFileSync } from "node:fs";
 import http from "node:http";
 import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
@@ -8,13 +9,16 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { crc32, inflateRawSync } from "node:zlib";
 
-import { atomicWriteText, parseJsonc } from "../backend/adapters.mjs";
+import { applyTargetMutations, atomicWriteText, getBuiltinTargets, parseJsonc, readTargetConfig } from "../backend/adapters.mjs";
 import { parseDshCordisMcpServers, updateDshCordisYaml } from "../backend/dsh-yaml.mjs";
 import { parseHermesMcpServers, updateHermesYaml } from "../backend/hermes-yaml.mjs";
 import { activate, createHubController } from "../backend/index.mjs";
+import { OAuthManager } from "../backend/oauth.mjs";
 import { probeMcpServer } from "../backend/probe.mjs";
+import { HubStore } from "../backend/store.mjs";
 import { parseCodexMcpServers, updateCodexToml } from "../backend/toml.mjs";
 import { McpFileWatcher } from "../backend/watcher.mjs";
+import { mount } from "../page/index.mjs";
 import { MESSAGES } from "../shared/i18n.mjs";
 import { detectBuiltinMcp, isCodexhostLoopbackServer, parseMcpJsonInput } from "../shared/models.mjs";
 
@@ -1172,7 +1176,7 @@ test("McpFileWatcher: real fs.watch debounce coalescing, atomic rename saves, se
   }
 });
 
-test("auto-sync advanced branches & regressions: single removal, broadcast scope, variant isolation, dynamic watcher refresh, and backup suffix matching", async () => {
+test("auto-sync advanced branches & regressions: single removal, broadcast scope, variant isolation, dynamic watcher refresh, and backup restore", async () => {
   const tmpRoot = await mkdtemp(path.join(os.tmpdir(), "mcp-hub-adv-"));
   const fakeHome = path.join(tmpRoot, "home");
   const dataDir = path.join(tmpRoot, "data");
@@ -1294,7 +1298,7 @@ test("auto-sync advanced branches & regressions: single removal, broadcast scope
     const ovRmCustom = await hub.removeCustomTarget({ targetId: customId });
     assert.equal(ovRmCustom.autoSync.watchingCount, 3);
 
-    // 4. Restoring a `copilot` backup succeeds cleanly without falsely matching `pi` substring
+    // 4. Restoring a Copilot backup
     const { backups } = await hub.listBackups();
     const copilotBackup = backups.find((b) => b.targetId === "copilot");
     assert.ok(copilotBackup);
@@ -1303,6 +1307,363 @@ test("auto-sync advanced branches & regressions: single removal, broadcast scope
   } finally {
     hub.dispose();
     await rm(tmpRoot, { recursive: true, force: true });
+  }
+});
+
+function createJsonConfig(servers) {
+  return JSON.stringify({ mcpServers: servers }, null, 2) + "\n";
+}
+
+async function createTemporaryHub(t, settings = {}) {
+  const tmpRoot = await mkdtemp(path.join(os.tmpdir(), "mcp-hub-review-"));
+  const home = path.join(tmpRoot, "home");
+  const dataDir = path.join(tmpRoot, "data");
+  const platform = "win32";
+  const hub = createHubController({
+    dataDir,
+    readSettings: async () => ({ autoBackup: true, enableBuiltinOAuth: false, ...settings }),
+    home,
+    platform,
+    watchDebounceMs: 5000,
+  });
+  t.after(async () => {
+    hub.dispose();
+    await rm(tmpRoot, { recursive: true, force: true });
+  });
+  const targets = new Map(getBuiltinTargets(home, platform).map((target) => [
+    target.id, { ...target, configPath: target.defaultPath },
+  ]));
+  return { hub, store: new HubStore(dataDir), home, targets };
+}
+
+async function writeConfig(configPath, content) {
+  await mkdir(path.dirname(configPath), { recursive: true });
+  await writeFile(configPath, content, "utf8");
+}
+
+test("Auto-Sync batches adds, updates, and removals into one backup and write per destination", async (t) => {
+  const { hub, store, targets } = await createTemporaryHub(t);
+  const sourceId = "codex";
+  const destinationIds = ["pi", "claude-code", "copilot"];
+  const sourceFile = targets.get(sourceId).configPath;
+  const initialDest = createJsonConfig({ updated: { command: "old" }, removed: { command: "remove-me" } });
+  await writeConfig(sourceFile, '[mcp_servers.updated]\ncommand = "old"\n[mcp_servers.removed]\ncommand = "remove-me"\n');
+  for (const id of destinationIds) await writeConfig(targets.get(id).configPath, initialDest);
+  await hub.importFromTarget({ sourceTargetId: "all" });
+  await hub.setAutoSyncConfig({
+    enabled: true,
+    targetIds: [sourceId, ...destinationIds],
+    syncAdditions: true,
+    syncUpdates: true,
+    syncRemovals: true,
+  });
+
+  const createBackup = HubStore.prototype.createBackup;
+  t.mock.method(HubStore.prototype, "createBackup", function (params) {
+    if (params.targetId === "copilot") throw new Error("Backup unavailable");
+    return createBackup.call(this, params);
+  });
+  const markSelfWrite = t.mock.method(McpFileWatcher.prototype, "markSelfWrite");
+  await writeFile(sourceFile, '[mcp_servers.updated]\ncommand = "new"\n[mcp_servers.added]\ncommand = "add-me"\n', "utf8");
+  assert.deepEqual(await hub.handleWatchedTargetChange(sourceId), { propagated: 6 });
+
+  assert.deepEqual(markSelfWrite.mock.calls.map(({ arguments: [id] }) => id), [
+    "pi", "pi", "claude-code", "claude-code",
+  ]);
+  const { backups } = await hub.listBackups();
+  assert.deepEqual(backups.map(({ targetId }) => targetId).sort(), ["claude-code", "pi"]);
+  const persisted = await store.load();
+  for (const backup of backups) {
+    assert.equal(await readFile(path.join(store.backupsDir, backup.payloadFile), "utf8"), initialDest);
+    const { servers } = await readTargetConfig(targets.get(backup.targetId));
+    assert.deepEqual(Object.keys(servers).sort(), ["added", "updated"]);
+    assert.equal(servers.added.transport.command, "add-me");
+    assert.equal(servers.updated.transport.command, "new");
+    assert.deepEqual(Object.keys(persisted.managedOwnersByTarget[backup.targetId]).sort(), ["added", "updated"]);
+  }
+  assert.equal(await readFile(targets.get("copilot").configPath, "utf8"), initialDest);
+  assert.deepEqual(Object.keys(persisted.managedOwnersByTarget.copilot).sort(), ["removed", "updated"]);
+  const { autoSyncLogs } = await hub.buildOverview();
+  assert.deepEqual(autoSyncLogs.map(({ action }) => action), ["remove", "update", "add"]);
+  for (const log of autoSyncLogs) {
+    assert.deepEqual(log.destNames, ["Pi", "Claude Code"]);
+  }
+});
+
+test("Auto-Sync propagates enabled toggles to DeepSeek, Hermes, Codex, and OpenCode", async (t) => {
+  const { hub, targets } = await createTemporaryHub(t);
+  const sourceId = "pi";
+  const destinationIds = ["deepseek-desktop", "hermes", "codex", "opencode"];
+  const source = targets.get(sourceId);
+  const toolbox = { enabled: true, transport: { type: "stdio", command: "toolbox", args: [] } };
+  for (const id of [sourceId, ...destinationIds]) {
+    await applyTargetMutations(targets.get(id), { toolbox }, []);
+  }
+  const initialTransports = new Map();
+  for (const id of destinationIds) {
+    const { servers } = await readTargetConfig(targets.get(id));
+    initialTransports.set(id, servers.toolbox.transport);
+  }
+  await hub.importFromTarget({ sourceTargetId: "all" });
+  await hub.setAutoSyncConfig({
+    enabled: true,
+    updateScope: "existing-only",
+    targetIds: [sourceId, ...destinationIds],
+    syncUpdates: true,
+  });
+
+  for (const enabled of [false, true]) {
+    await writeFile(source.configPath, createJsonConfig({ toolbox: { command: "toolbox", enabled } }), "utf8");
+    assert.deepEqual(await hub.handleWatchedTargetChange(sourceId), { propagated: destinationIds.length });
+    for (const id of destinationIds) {
+      const { servers } = await readTargetConfig(targets.get(id));
+      assert.equal(servers.toolbox.enabled, enabled, id);
+      assert.deepEqual(servers.toolbox.transport, initialTransports.get(id), id);
+    }
+  }
+});
+
+test("Backup restore suppresses the exact metadata target before writing, even when its ID ends in _pi", async (t) => {
+  const { hub, store, home, targets } = await createTemporaryHub(t);
+  const targetId = "custom-my_pi";
+  const configPath = path.join(home, "custom.json");
+  const piFile = targets.get("pi").configPath;
+  const initial = createJsonConfig({ toolbox: { command: "new" } });
+  const original = createJsonConfig({ toolbox: { command: "old" } });
+  await writeConfig(configPath, initial);
+  await writeConfig(piFile, initial);
+  const state = await store.load();
+  state.customTargets = [{ id: targetId, name: "Custom Pi", configPath }];
+  await store.save(state);
+  const backup = await store.createBackup({ targetId, targetName: "Custom Pi", configPath, content: original });
+  assert.ok(backup.id.endsWith("_pi"));
+
+  const markSelfWrite = McpFileWatcher.prototype.markSelfWrite;
+  const marks = [];
+  t.mock.method(McpFileWatcher.prototype, "markSelfWrite", function (id, holdMs) {
+    marks.push([id, readFileSync(configPath, "utf8")]);
+    return markSelfWrite.call(this, id, holdMs);
+  });
+  for (const invalidId of ["", "../pi", "nested\\pi", "pi:stream"]) {
+    await assert.rejects(hub.restoreBackup({ backupId: invalidId }), /Invalid backup ID/);
+  }
+  const { restored } = await hub.restoreBackup({ backupId: backup.id });
+  assert.equal(restored.targetId, targetId);
+  assert.deepEqual(marks, [[targetId, initial], [targetId, original]]);
+  assert.equal(await readFile(configPath, "utf8"), original);
+  assert.equal(await readFile(piFile, "utf8"), initial);
+});
+
+test("UTF-8 BOM JSON, ZCode JSON, and VS Code JSONC configs can be read and updated", async (t) => {
+  const { targets } = await createTemporaryHub(t);
+  const entry = { command: "before" };
+  const fixtures = {
+    pi: JSON.stringify({ mcpServers: { toolbox: entry }, unrelated: true }),
+    zcode: JSON.stringify({ mcp: { servers: { toolbox: entry } }, unrelated: true }),
+    vscode: '{\n // VS Code config\n "servers": { "toolbox": { "type": "stdio", "command": "before", }, },\n "unrelated": true,\n}',
+  };
+  assert.equal(parseJsonc("\uFEFF" + fixtures.vscode).servers.toolbox.command, "before");
+  for (const [id, text] of Object.entries(fixtures)) {
+    const target = targets.get(id);
+    const content = "\uFEFF" + text;
+    await writeConfig(target.configPath, content);
+    const before = await readTargetConfig(target);
+    assert.equal(before.error, null, id);
+    assert.equal(before.rawText, content, id);
+    assert.equal(before.servers.toolbox.transport.command, "before", id);
+    const { nextText } = await applyTargetMutations(target, {
+      toolbox: { enabled: true, transport: { type: "stdio", command: "after" } },
+    }, []);
+    assert.equal(JSON.parse(nextText).unrelated, true, id);
+    const after = await readTargetConfig(target);
+    assert.equal(after.error, null, id);
+    assert.equal(after.servers.toolbox.transport.command, "after", id);
+  }
+});
+
+test("Malformed Codex TOML trips the Auto-Sync parse circuit breaker and preserves the baseline", async (t) => {
+  const { hub, targets } = await createTemporaryHub(t);
+  const codex = targets.get("codex");
+  const pi = targets.get("pi");
+  const original = '[mcp_servers.toolbox]\ncommand = "before"\n';
+  const piOriginal = createJsonConfig({ toolbox: { command: "before" } });
+  await writeConfig(codex.configPath, original);
+  await writeConfig(pi.configPath, piOriginal);
+  await hub.importFromTarget({ sourceTargetId: "all" });
+  await hub.setAutoSyncConfig({ enabled: true, targetIds: ["codex", "pi"], syncUpdates: true, syncRemovals: true });
+
+  for (const [text, error] of [
+    ['[mcp_servers.toolbox\ncommand = "after"\n', /section header/],
+    ['[mcp_servers.toolbox]\ncommand = "after\n', /quoted string/],
+    ["[mcp_servers.toolbox]\ncommand = 'after\n", /quoted string/],
+    [original + 'args = [\n "after",\n', /missing closing "\]"/],
+    [original + 'env = {\n KEY = "after"\n', /missing closing "}"/],
+    ['notes = """\n' + original, /unclosed multiline string/],
+  ]) {
+    assert.throws(() => parseCodexMcpServers(text), error);
+    await writeFile(codex.configPath, text, "utf8");
+    const snapshot = await readTargetConfig(codex);
+    assert.match(snapshot.error, /^TOML parse error at line \d+:/);
+    assert.match(snapshot.error, error);
+    assert.deepEqual(await hub.handleWatchedTargetChange("codex"), { propagated: 0, blocked: "parse-error" });
+    assert.equal(await readFile(pi.configPath, "utf8"), piOriginal);
+  }
+  assert.equal((await hub.listBackups()).backups.length, 0);
+  const { autoSyncLogs } = await hub.buildOverview();
+  assert.equal(autoSyncLogs.length, 6);
+  assert.ok(autoSyncLogs.every((log) => log.status === "blocked" && /^TOML parse error/.test(log.detail)));
+
+  await writeFile(codex.configPath, [
+    'notes = """',
+    '[mcp_servers.fake',
+    '"""',
+    '[mcp_servers.toolbox] # comment with " and [',
+    'command = "after"',
+    'args = [',
+    '  "#]", # comment with ]',
+    ']',
+    '[[other.entries]]',
+    'command = "unrelated"',
+    '',
+  ].join("\n"), "utf8");
+  assert.deepEqual(await hub.handleWatchedTargetChange("codex"), { propagated: 1 });
+  const { servers } = await readTargetConfig(pi);
+  assert.deepEqual(Object.keys(servers), ["toolbox"]);
+  assert.equal(servers.toolbox.transport.command, "after");
+  assert.deepEqual(servers.toolbox.transport.args, ["#]"]);
+});
+
+test("Overview reads OAuth status once per server ID and reuses it for same-URL cards", async (t) => {
+  const { hub } = await createTemporaryHub(t, { enableBuiltinOAuth: true });
+  const url = "https://oauth.example/mcp";
+  await hub.saveServer({ name: "first", transport: { type: "http", url } });
+  await hub.saveServer({ name: "second", transport: { type: "http", url } });
+  await hub.saveServer({ name: "local", transport: { type: "stdio", command: "toolbox" } });
+  const initial = await hub.buildOverview();
+  const firstId = initial.servers.find((s) => s.name === "first").id;
+  const secondId = initial.servers.find((s) => s.name === "second").id;
+  const firstStatus = { authenticated: true };
+  const secondStatus = { authenticated: false };
+  const getPublicStatus = t.mock.method(OAuthManager.prototype, "getPublicStatus", async (_url, id) =>
+    id === firstId ? firstStatus : secondStatus,
+  );
+
+  const overview = await hub.buildOverview();
+  assert.deepEqual(getPublicStatus.mock.calls.map((call) => call.arguments), [[url, firstId], [url, secondId]]);
+  assert.equal(overview.servers.find((s) => s.id === firstId).oauth, firstStatus);
+  const second = overview.servers.find((s) => s.id === secondId);
+  assert.equal(second.oauth, secondStatus);
+  assert.deepEqual(second.oauthAuthHint, { needsAuth: true, status: 401 });
+  assert.equal(overview.servers.find((s) => s.name === "local").oauth, null);
+  assert.equal(Object.hasOwn(overview, "_hasTargetCount"), false);
+});
+
+test("Page restores focus for special-character keys and clears all polling on abort", async (t) => {
+  class TestElement {
+    children = [];
+    attrs = new Map();
+    listeners = new Map();
+
+    constructor(tag) { this.tag = tag; }
+    appendChild(child) { this.children.push(child); }
+    replaceChildren(...children) { this.children = children; }
+    setAttribute(name, value) { this.attrs.set(name, value); }
+    getAttribute(name) { return this.attrs.get(name) ?? null; }
+    addEventListener(event, fn) { this.listeners.set(event, fn); }
+    click() { this.listeners.get("click")(); }
+    focus() { document.activeElement = this; }
+    setSelectionRange(start, end) {
+      this.selectionStart = start;
+      this.selectionEnd = end;
+    }
+    *descendants() {
+      for (const child of this.children) {
+        yield child;
+        yield* child.descendants();
+      }
+    }
+    querySelectorAll(selector) {
+      const match = /^\[([\w-]+)(?:="([^"\\\r\n]*)")?\]$/.exec(selector);
+      if (!match) throw new DOMException("Invalid selector", "SyntaxError");
+      const [, name, value] = match;
+      return [...this.descendants()].filter((el) =>
+        value === undefined ? el.attrs.has(name) : el.getAttribute(name) === value,
+      );
+    }
+    querySelector(selector) { return this.querySelectorAll(selector)[0] ?? null; }
+  }
+
+  const testDocument = {
+    activeElement: null,
+    createElement: (tag) => new TestElement(tag),
+    createElementNS: (_ns, tag) => new TestElement(tag),
+    createTextNode: (text) => Object.assign(new TestElement("#text"), { textContent: text }),
+  };
+  for (const [name, value] of Object.entries({ document: testDocument, window: new EventTarget() })) {
+    const previous = Object.getOwnPropertyDescriptor(globalThis, name);
+    Object.defineProperty(globalThis, name, { value, configurable: true });
+    t.after(() => {
+      if (previous) Object.defineProperty(globalThis, name, previous);
+      else delete globalThis[name];
+    });
+  }
+  const timers = new Set();
+  t.mock.method(globalThis, "setInterval", (_fn, delay) => {
+    const timer = { delay };
+    timers.add(timer);
+    return timer;
+  });
+  t.mock.method(globalThis, "clearInterval", (timer) => timers.delete(timer));
+  const targetId = 'custom-quote"bracket]\\slash';
+  const root = new TestElement("root");
+  const controller = new AbortController();
+  let changeTheme;
+  const unmount = await mount(root, {
+    locale: "en",
+    signal: controller.signal,
+    onLocaleChange: () => () => {},
+    onColorSchemeChange: (fn) => {
+      changeTheme = fn;
+      return () => {};
+    },
+    backend: {
+      invoke: async (method) => {
+        assert.equal(method, "overview");
+        return {
+          features: { oauthEnabled: true },
+          targets: [{
+            id: targetId, name: "Target", enabled: true, exists: true,
+            configPath: "mock-config.json", nativeServers: [],
+          }],
+          servers: ["first", "second"].map((id) => ({
+            id, name: id, enabled: true,
+            transport: { type: "http", url: "https://oauth.example/mcp" },
+            oauthPending: { status: "pending", expiresAt: new Date(Date.now() + 60_000).toISOString() },
+          })),
+        };
+      },
+    },
+  });
+  try {
+    assert.deepEqual([...timers].map(({ delay }) => delay).sort(), [1200, 1200, 2500]);
+    [...root.descendants()].find((el) =>
+      el.tag === "button" && el.children.some((child) => child.textContent === MESSAGES.en.tabTargets),
+    ).click();
+    [...root.descendants()].find((el) => el.tag === "button" && el.textContent === MESSAGES.en.targetEditPath).click();
+    const oldInput = root.querySelector("[data-keep-focus]");
+    assert.equal(oldInput.getAttribute("data-keep-focus"), `target-path-${targetId}`);
+    oldInput.focus();
+    oldInput.setSelectionRange(1, 4);
+    changeTheme("dark");
+    const newInput = root.querySelector("[data-keep-focus]");
+    assert.notEqual(newInput, oldInput);
+    assert.equal(testDocument.activeElement, newInput);
+    assert.deepEqual([newInput.selectionStart, newInput.selectionEnd], [1, 4]);
+
+    controller.abort();
+    assert.equal(timers.size, 0);
+  } finally {
+    unmount();
   }
 });
 
@@ -1480,6 +1841,8 @@ test("v2.5.0: copilot-json format (type:local + tools preservation), persistent 
 });
 
 test("v2.5.2: probeMcpServer reports toolCount & toolNames for Streamable HTTP (JSON + SSE + session) without child_process", async () => {
+  const { version } = JSON.parse(await readFile(path.join(rootDir, "manifest.json"), "utf8"));
+  const clientInfos = [];
   const httpServer = http.createServer((req, res) => {
     let raw = "";
     req.on("data", (c) => {
@@ -1487,6 +1850,7 @@ test("v2.5.2: probeMcpServer reports toolCount & toolNames for Streamable HTTP (
     });
     req.on("end", () => {
       const msg = raw ? JSON.parse(raw) : {};
+      if (msg.method === "initialize") clientInfos.push(msg.params.clientInfo);
       if (req.url === "/mcp-json") {
         if (msg.method === "initialize") {
           res.writeHead(200, { "Content-Type": "application/json", "mcp-session-id": "sess-123" });
@@ -1553,6 +1917,10 @@ test("v2.5.2: probeMcpServer reports toolCount & toolNames for Streamable HTTP (
     assert.equal(httpSseRes.toolCount, 1);
     assert.deepEqual(httpSseRes.toolNames, ["sse_tool_1"]);
     assert.deepEqual(httpSseRes.tools, [{ name: "sse_tool_1", description: "Streamed SSE tool" }]);
+    assert.deepEqual(clientInfos, [
+      { name: "codexhost-mcp-hub", version },
+      { name: "codexhost-mcp-hub", version },
+    ]);
   } finally {
     httpServer.close();
   }
@@ -3249,5 +3617,108 @@ test("v2.5.6: VS Code User mcp.json (JSONC with comments & trailing commas, serv
   } finally {
     hub.dispose();
     await rm(tmpRoot, { recursive: true, force: true });
+  }
+});
+
+test("v2.5.7: OAuthManager serializes concurrent token mutations and never resurrects a logged-out card during in-flight refresh", async () => {
+  let releaseRefresh = null;
+  let refreshStarted = null;
+  const refreshStartedPromise = new Promise((resolve) => {
+    refreshStarted = resolve;
+  });
+
+  const mockServer = http.createServer((req, res) => {
+    let raw = "";
+    req.on("data", (c) => {
+      raw += c;
+    });
+    req.on("end", () => {
+      const u = new URL(req.url, "http://127.0.0.1");
+      if (u.pathname === "/token" && req.method === "POST") {
+        refreshStarted();
+        new Promise((resolve) => {
+          releaseRefresh = resolve;
+        }).then(() => {
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(
+            JSON.stringify({
+              access_token: "resurrected-tok",
+              refresh_token: "resurrected-rt",
+              token_type: "Bearer",
+              expires_in: 3600,
+            }),
+          );
+        });
+        return;
+      }
+      res.writeHead(404);
+      res.end();
+    });
+  });
+
+  const port = await listenSafePort(mockServer);
+  const baseUrl = `http://127.0.0.1:${port}`;
+  const tmpDir = await mkdtemp(path.join(os.tmpdir(), "mcp-hub-oauth-mutex-"));
+
+  try {
+    const { OAuthManager } = await import("../backend/oauth.mjs");
+    const mgr = new OAuthManager({ dataDir: tmpDir });
+    const serverUrl = `${baseUrl}/mcp`;
+    await writeFile(
+      path.join(tmpDir, "oauth-tokens.json"),
+      JSON.stringify(
+        {
+          "card:srv-a": {
+            serverId: "srv-a",
+            serverUrl,
+            accessToken: "tok-a",
+            refreshToken: "rt-a",
+            tokenType: "Bearer",
+            expiresAt: Date.now() - 1000,
+            tokenEndpoint: `${baseUrl}/token`,
+            clientId: "cid-a",
+          },
+          "card:srv-b": {
+            serverId: "srv-b",
+            serverUrl,
+            accessToken: "tok-b",
+            refreshToken: "rt-b",
+            tokenType: "Bearer",
+            expiresAt: Date.now() + 3600_000,
+            tokenEndpoint: `${baseUrl}/token`,
+            clientId: "cid-b",
+          },
+          "card:srv-c": {
+            serverId: "srv-c",
+            serverUrl,
+            accessToken: "tok-c",
+            refreshToken: "rt-c",
+            tokenType: "Bearer",
+            expiresAt: Date.now() + 3600_000,
+            tokenEndpoint: `${baseUrl}/token`,
+            clientId: "cid-c",
+          },
+        },
+        null,
+        2,
+      ),
+      "utf8",
+    );
+
+    // 1. Start refresh on srv-a, then logout srv-a & delete srv-b concurrently while refresh is in flight
+    const refreshPromise = mgr.refreshTokenWithDetails(serverUrl, 5000, "srv-a");
+    await refreshStartedPromise;
+    await Promise.all([mgr.logout(serverUrl, "srv-a"), mgr.deleteCardToken("srv-b")]);
+    releaseRefresh();
+    await assert.rejects(refreshPromise, /cleared while refresh was in flight/i);
+
+    const stored = JSON.parse(await readFile(path.join(tmpDir, "oauth-tokens.json"), "utf8"));
+    assert.equal(stored["card:srv-a"], undefined, "Logged-out srv-a must not be resurrected by in-flight refresh");
+    assert.equal(stored["card:srv-b"], undefined, "Deleted srv-b must remain deleted");
+    assert.equal(stored["card:srv-c"].accessToken, "tok-c", "Unrelated sibling srv-c token must stay intact");
+    mgr.dispose();
+  } finally {
+    mockServer.close();
+    await rm(tmpDir, { recursive: true, force: true });
   }
 });
