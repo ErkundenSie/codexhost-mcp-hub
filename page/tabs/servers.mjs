@@ -272,13 +272,46 @@ export function renderServersTab(ctx) {
       } else {
         text = t("probeFail", { error: probe.error });
       }
+      const toolsList = Array.isArray(probe.tools) ? probe.tools : [];
+      const toolsExpanded = state.expandedToolIds.has(server.id);
       const toolPreview =
-        hasTools && Array.isArray(probe.toolNames) && probe.toolNames.length > 0
+        !toolsExpanded && hasTools && Array.isArray(probe.toolNames) && probe.toolNames.length > 0
           ? `${probe.toolNames.join(", ")}${probe.toolCount > probe.toolNames.length ? " …" : ""}`
           : "";
       probeEl = el("div", { className: `mh-probe-bar ${probe.ok ? "is-ok" : "is-err"}` }, [
-        el("div", { text }),
+        el("div", { className: "mh-probe-head" }, [
+          el("span", { text }),
+          toolsList.length > 0
+            ? el("button", {
+                className: "mh-btn-link",
+                text: toolsExpanded
+                  ? t("probeToolsHide")
+                  : t("probeToolsShow", { count: probe.toolCount ?? toolsList.length }),
+                onClick: () => {
+                  if (toolsExpanded) state.expandedToolIds.delete(server.id);
+                  else state.expandedToolIds.add(server.id);
+                  render();
+                },
+              })
+            : null,
+        ]),
         toolPreview ? el("div", { className: "mh-probe-tools", text: toolPreview }) : null,
+        toolsExpanded && toolsList.length > 0
+          ? el(
+              "div",
+              { className: "mh-tools-list" },
+              toolsList.map((tool) =>
+                el("div", { className: "mh-tool-row" }, [
+                  el("span", { className: "mh-tool-name", title: tool.name, text: tool.name }),
+                  el("span", {
+                    className: "mh-tool-desc",
+                    title: tool.description || t("probeToolNoDesc"),
+                    text: tool.description || t("probeToolNoDesc"),
+                  }),
+                ]),
+              ),
+            )
+          : null,
       ]);
     }
 

@@ -36,6 +36,7 @@ export async function mount(root, api) {
     projectFormats: new Set(["project-mcp-json"]),
     probes: {},
     probingIds: new Set(),
+    expandedToolIds: new Set(),
     modal: null,
     toasts: [],
   };
@@ -259,6 +260,9 @@ export async function mount(root, api) {
     try {
       const res = await api.backend.invoke("servers/probe", { id: server.id });
       state.probes[server.id] = res;
+      if (Array.isArray(res?.tools) && res.tools.length > 0) {
+        state.expandedToolIds.add(server.id);
+      }
     } catch (err) {
       state.probes[server.id] = {
         ok: false,

@@ -6,10 +6,13 @@
 import { access } from "node:fs/promises";
 import path from "node:path";
 
+const MAX_DISCOVERED_TOOLS = 60;
+const MAX_TOOL_DESC_LEN = 240;
+
 const INIT_PARAMS = {
   protocolVersion: "2024-11-05",
   capabilities: {},
-  clientInfo: { name: "codexhost-mcp-hub", version: "2.5.2" },
+  clientInfo: { name: "codexhost-mcp-hub", version: "2.5.3" },
 };
 
 function isLocalAbsolutePath(value) {
@@ -50,13 +53,21 @@ function parseJsonRpcPayload(text) {
 function extractToolsInfo(messages) {
   for (const msg of messages) {
     if (msg && typeof msg === "object" && Array.isArray(msg.result?.tools)) {
-      const tools = msg.result.tools;
+      const rawTools = msg.result.tools;
+      const tools = [];
+      for (const item of rawTools) {
+        const name = typeof item?.name === "string" ? item.name.trim() : "";
+        if (!name) continue;
+        const rawDesc = typeof item?.description === "string" ? item.description.replace(/\s+/g, " ").trim() : "";
+        const description =
+          rawDesc.length > MAX_TOOL_DESC_LEN ? `${rawDesc.slice(0, MAX_TOOL_DESC_LEN - 1)}…` : rawDesc;
+        tools.push({ name, description });
+        if (tools.length >= MAX_DISCOVERED_TOOLS) break;
+      }
       return {
-        toolCount: tools.length,
-        toolNames: tools
-          .slice(0, 8)
-          .map((item) => (typeof item?.name === "string" ? item.name.trim() : ""))
-          .filter(Boolean),
+        toolCount: rawTools.length,
+        toolNames: tools.slice(0, 8).map((item) => item.name),
+        tools,
       };
     }
   }
@@ -196,7 +207,9 @@ export async function probeMcpServer(server, timeoutMs = 4000) {
         needsAuth: false,
         kind: t.type,
         status: response.status,
-        ...(toolsInfo ? { toolCount: toolsInfo.toolCount, toolNames: toolsInfo.toolNames } : {}),
+        ...(toolsInfo
+          ? { toolCount: toolsInfo.toolCount, toolNames: toolsInfo.toolNames, tools: toolsInfo.tools }
+          : {}),
       };
     }
 

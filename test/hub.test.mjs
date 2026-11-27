@@ -1201,7 +1201,7 @@ test("auto-sync advanced branches & regressions: single removal, broadcast scope
     readSettings: async () => ({ autoBackup: true, excludeBuiltinMcp: true }),
     home: fakeHome,
     platform: "win32",
-    watchDebounceMs: 60,
+    watchDebounceMs: 5000,
   });
 
   try {
@@ -1479,7 +1479,12 @@ test("v2.5.2: probeMcpServer reports toolCount & toolNames for Streamable HTTP (
             JSON.stringify({
               jsonrpc: "2.0",
               id: msg.id,
-              result: { tools: [{ name: "http_search" }, { name: "http_fetch" }] },
+              result: {
+                tools: [
+                  { name: "http_search", description: "Search documents across workspace" },
+                  { name: "http_fetch", description: "Fetch a remote resource by URL" },
+                ],
+              },
             }),
           );
         }
@@ -1493,7 +1498,7 @@ test("v2.5.2: probeMcpServer reports toolCount & toolNames for Streamable HTTP (
         } else if (msg.method === "tools/list") {
           res.writeHead(200, { "Content-Type": "text/event-stream" });
           res.end(
-            `event: message\ndata: ${JSON.stringify({ jsonrpc: "2.0", id: msg.id, result: { tools: [{ name: "sse_tool_1" }] } })}\n\n`,
+            `event: message\ndata: ${JSON.stringify({ jsonrpc: "2.0", id: msg.id, result: { tools: [{ name: "sse_tool_1", description: "Streamed SSE tool" }] } })}\n\n`,
           );
         }
       }
@@ -1512,6 +1517,10 @@ test("v2.5.2: probeMcpServer reports toolCount & toolNames for Streamable HTTP (
     assert.equal(httpJsonRes.ok, true);
     assert.equal(httpJsonRes.toolCount, 2);
     assert.deepEqual(httpJsonRes.toolNames, ["http_search", "http_fetch"]);
+    assert.deepEqual(httpJsonRes.tools, [
+      { name: "http_search", description: "Search documents across workspace" },
+      { name: "http_fetch", description: "Fetch a remote resource by URL" },
+    ]);
 
     // 2. Streamable HTTP SSE-formatted response
     const httpSseRes = await probeMcpServer(
@@ -1521,6 +1530,7 @@ test("v2.5.2: probeMcpServer reports toolCount & toolNames for Streamable HTTP (
     assert.equal(httpSseRes.ok, true);
     assert.equal(httpSseRes.toolCount, 1);
     assert.deepEqual(httpSseRes.toolNames, ["sse_tool_1"]);
+    assert.deepEqual(httpSseRes.tools, [{ name: "sse_tool_1", description: "Streamed SSE tool" }]);
   } finally {
     httpServer.close();
   }

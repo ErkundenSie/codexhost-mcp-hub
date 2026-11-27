@@ -1094,12 +1094,66 @@
   color: var(--cx-page-danger, #cf222e);
 }
 
+.mh-probe-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
 .mh-probe-tools {
   margin-top: 3px;
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   font-size: 11px;
   color: var(--cx-page-text-muted, #64748b);
   word-break: break-word;
+}
+
+.mh-tools-list {
+  margin-top: 8px;
+  max-height: 220px;
+  overflow-y: auto;
+  border: 1px solid var(--mh-divider);
+  border-radius: var(--mh-radius-sm);
+  background: var(--cx-page-bg, #ffffff);
+  color: var(--cx-page-text, #18181b);
+}
+
+.mh-tool-row {
+  display: grid;
+  grid-template-columns: minmax(130px, 210px) minmax(0, 1fr);
+  align-items: baseline;
+  gap: 12px;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--mh-divider);
+  font-size: 12px;
+}
+
+.mh-tool-row:last-child {
+  border-bottom: none;
+}
+
+.mh-tool-row:hover {
+  background: var(--mh-surface-subtle);
+}
+
+.mh-tool-name {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--cx-page-text, #18181b);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.mh-tool-desc {
+  font-size: 11.5px;
+  color: var(--cx-page-text-muted, #64748b);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .mh-empty {
