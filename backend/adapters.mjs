@@ -10,6 +10,7 @@ import os from "node:os";
 import path from "node:path";
 import { cleanStringMap, normalizeTransport } from "../shared/models.mjs";
 import { parseDshCordisMcpServers, updateDshCordisYaml } from "./dsh-yaml.mjs";
+import { parseHermesMcpServers, updateHermesYaml } from "./hermes-yaml.mjs";
 import { parseCodexMcpServers, updateCodexToml } from "./toml.mjs";
 
 function claudeDesktopDefaultPath(home, platform) {
@@ -22,9 +23,96 @@ function claudeDesktopDefaultPath(home, platform) {
   return path.join(home, ".config", "Claude", "claude_desktop_config.json");
 }
 
+function devinDefaultPath(home, platform) {
+  if (platform === "win32") {
+    return path.join(home, "AppData", "Roaming", "devin", "mcp_config.json");
+  }
+  return path.join(home, ".config", "devin", "mcp_config.json");
+}
+
+function vscodeDefaultPath(home, platform) {
+  if (platform === "win32") {
+    return path.join(home, "AppData", "Roaming", "Code", "User", "mcp.json");
+  }
+  if (platform === "darwin") {
+    return path.join(home, "Library", "Application Support", "Code", "User", "mcp.json");
+  }
+  return path.join(home, ".config", "Code", "User", "mcp.json");
+}
+
+/**
+ * Parse JSON or JSONC (supports `//` line comments, block comments, and trailing commas),
+ * as written natively by VS Code `mcp.json`.
+ */
+export function parseJsonc(text) {
+  const src = String(text ?? "");
+  let stripped = "";
+  let inString = false;
+  let escaped = false;
+  for (let i = 0; i < src.length; i++) {
+    const ch = src[i];
+    const next = src[i + 1];
+    if (inString) {
+      stripped += ch;
+      if (escaped) escaped = false;
+      else if (ch === "\\") escaped = true;
+      else if (ch === '"') inString = false;
+      continue;
+    }
+    if (ch === '"') {
+      inString = true;
+      stripped += ch;
+      continue;
+    }
+    if (ch === "/" && next === "/") {
+      i += 2;
+      while (i < src.length && src[i] !== "\n") i++;
+      if (i < src.length) stripped += "\n";
+      continue;
+    }
+    if (ch === "/" && next === "*") {
+      i += 2;
+      while (i < src.length && !(src[i] === "*" && src[i + 1] === "/")) i++;
+      if (i >= src.length) throw new Error("Unterminated block comment in JSONC");
+      i++;
+      continue;
+    }
+    stripped += ch;
+  }
+
+  let clean = "";
+  inString = false;
+  escaped = false;
+  for (let i = 0; i < stripped.length; i++) {
+    const ch = stripped[i];
+    if (inString) {
+      clean += ch;
+      if (escaped) escaped = false;
+      else if (ch === "\\") escaped = true;
+      else if (ch === '"') inString = false;
+      continue;
+    }
+    if (ch === '"') {
+      inString = true;
+      clean += ch;
+      continue;
+    }
+    if (ch === ",") {
+      let j = i + 1;
+      while (j < stripped.length && /\s/.test(stripped[j])) j++;
+      if (stripped[j] === "}" || stripped[j] === "]") {
+        continue;
+      }
+    }
+    clean += ch;
+  }
+
+  return JSON.parse(clean);
+}
+
 /**
  * Built-in global AI Harness target descriptors.
- * `format`: "standard-json" | "antigravity-json" | "copilot-json" | "opencode-json" | "codex-toml" | "dsh-cordis-yaml"
+ * `format`: "standard-json" | "antigravity-json" | "copilot-json" | "opencode-json" | "zcode-json" | "vscode-json" | "codex-toml" | "dsh-cordis-yaml" | "hermes-yaml"
  * `detectFiles`: strict indicator files proving the AI is genuinely installed locally
  * (never match shared parent folders like `~/.gemini` or empty `logs/` dirs).
  */
@@ -192,8 +280,60 @@ export function getBuiltinTargets(home = os.homedir(), platform = process.platfo
       shortName: "Qoder",
       format: "standard-json",
       rootKey: "mcpServers",
-      defaultPath: path.join(home, ".qoder-cn", "mcp.json"),
-      detectFiles: [path.join(home, ".qoder-cn", "mcp.json"), path.join(home, ".qoder", "mcp.json")],
+      defaultPath: path.join(home, ".qoder", "settings.json"),
+      detectFiles: [path.join(home, ".qoder", "settings.json"), path.join(home, ".qoder", "mcp.json")],
+    },
+    {
+      id: "qoder-cn",
+      name: "Qoder CN",
+      shortName: "Qoder CN",
+      format: "standard-json",
+      rootKey: "mcpServers",
+      defaultPath: path.join(home, ".qoder-cn", "settings.json"),
+      detectFiles: [path.join(home, ".qoder-cn", "settings.json"), path.join(home, ".qoder-cn", "mcp.json")],
+    },
+    {
+      id: "omp",
+      name: "Oh My Pi",
+      shortName: "OMP",
+      format: "standard-json",
+      rootKey: "mcpServers",
+      defaultPath: path.join(home, ".omp", "agent", "mcp.json"),
+      detectFiles: [
+        path.join(home, ".omp", "agent", "mcp.json"),
+        path.join(home, ".omp", "agent", "settings.json"),
+        path.join(home, ".omp", "mcp.json"),
+      ],
+    },
+    {
+      id: "zcode",
+      name: "ZCode",
+      shortName: "ZCode",
+      format: "zcode-json",
+      rootKey: "mcp.servers",
+      defaultPath: path.join(home, ".zcode", "cli", "config.json"),
+      detectFiles: [path.join(home, ".zcode", "cli", "config.json"), path.join(home, ".zcode", "config.json")],
+    },
+    {
+      id: "hermes",
+      name: "Hermes",
+      shortName: "Hermes",
+      format: "hermes-yaml",
+      rootKey: "mcp_servers",
+      defaultPath: path.join(home, ".hermes", "config.yaml"),
+      detectFiles: [path.join(home, ".hermes", "config.yaml"), path.join(home, ".hermes", ".env")],
+    },
+    {
+      id: "devin",
+      name: "Devin CLI",
+      shortName: "Devin",
+      format: "standard-json",
+      rootKey: "mcpServers",
+      defaultPath: devinDefaultPath(home, platform),
+      detectFiles: [
+        devinDefaultPath(home, platform),
+        path.join(path.dirname(devinDefaultPath(home, platform)), "config.json"),
+      ],
     },
     {
       id: "deepseek-desktop",
@@ -217,6 +357,18 @@ export function getBuiltinTargets(home = os.homedir(), platform = process.platfo
       detectFiles: [
         path.join(home, ".dsh", "profiles", "web", "cordis.patch.yml"),
         path.join(home, ".dsh", "profiles", "web", "package.json"),
+      ],
+    },
+    {
+      id: "vscode",
+      name: "VS Code",
+      shortName: "VS Code",
+      format: "vscode-json",
+      rootKey: "servers",
+      defaultPath: vscodeDefaultPath(home, platform),
+      detectFiles: [
+        vscodeDefaultPath(home, platform),
+        path.join(path.dirname(vscodeDefaultPath(home, platform)), "settings.json"),
       ],
     },
   ];
@@ -252,6 +404,13 @@ export function getProjectTargetDescriptors(projectDir) {
       format: "opencode-json",
       rootKey: "mcp",
       configPath: path.join(dir, "opencode.json"),
+    },
+    {
+      id: "project-vscode",
+      name: "VS Code (.vscode/mcp.json)",
+      format: "vscode-json",
+      rootKey: "servers",
+      configPath: path.join(dir, ".vscode", "mcp.json"),
     },
   ];
 }
@@ -347,7 +506,53 @@ function serializeJsonEntry(server, format, existingEntry = null) {
     };
   }
 
-  // standard-json (Claude Code, Cursor, Copilot, CodeBuddy, Claude Desktop, Qwen, Gemini, Kiro, Kimi, etc.)
+  if (format === "vscode-json") {
+    const preserved = {};
+    if (existingEntry && typeof existingEntry === "object" && !Array.isArray(existingEntry)) {
+      for (const k of ["gallery", "version", "envFile", "oauth", "sandbox", "dev"]) {
+        if (existingEntry[k] !== undefined) preserved[k] = existingEntry[k];
+      }
+    }
+    if (t.type === "stdio") {
+      const env = cleanStringMap(t.env);
+      return {
+        type: "stdio",
+        command: t.command,
+        ...(t.args?.length ? { args: t.args } : {}),
+        ...(Object.keys(env).length ? { env } : {}),
+        ...(t.cwd ? { cwd: t.cwd } : {}),
+        ...preserved,
+      };
+    }
+    const headers = cleanStringMap(t.headers);
+    return {
+      type: t.type === "sse" ? "sse" : "http",
+      url: t.url,
+      ...(Object.keys(headers).length ? { headers } : {}),
+      ...preserved,
+    };
+  }
+
+  if (format === "zcode-json") {
+    if (t.type === "stdio") {
+      const env = cleanStringMap(t.env);
+      return {
+        type: "stdio",
+        command: t.command,
+        ...(t.args?.length ? { args: t.args } : {}),
+        ...(Object.keys(env).length ? { env } : {}),
+        ...(t.cwd ? { cwd: t.cwd } : {}),
+      };
+    }
+    const headers = cleanStringMap(t.headers);
+    return {
+      type: t.type === "sse" ? "sse" : "http",
+      url: t.url,
+      ...(Object.keys(headers).length ? { headers } : {}),
+    };
+  }
+
+  // standard-json (Claude Code, Cursor, CodeBuddy, Claude Desktop, Qwen, Gemini, Kiro, Kimi, OMP, Devin, Qoder, etc.)
   if (t.type === "stdio") {
     const env = cleanStringMap(t.env);
     return {
@@ -434,10 +639,30 @@ export async function readTargetConfig(target) {
     }
   }
 
-  // JSON formats
+  if (target.format === "hermes-yaml") {
+    try {
+      return {
+        exists: true,
+        detected: true,
+        servers: parseHermesMcpServers(rawText),
+        rawText,
+        error: null,
+      };
+    } catch (err) {
+      return {
+        exists: true,
+        detected: true,
+        servers: {},
+        rawText,
+        error: err instanceof Error ? err.message : String(err),
+      };
+    }
+  }
+
+  // JSON / JSONC formats
   try {
     const trimmed = rawText.trim();
-    const doc = trimmed ? JSON.parse(trimmed) : {};
+    const doc = trimmed ? (target.format === "vscode-json" ? parseJsonc(trimmed) : JSON.parse(trimmed)) : {};
     if (!doc || typeof doc !== "object" || Array.isArray(doc)) {
       return {
         exists: true,
@@ -448,7 +673,12 @@ export async function readTargetConfig(target) {
       };
     }
     const rootKey = target.rootKey || "mcpServers";
-    const section = doc[rootKey];
+    const section =
+      target.format === "zcode-json"
+        ? doc.mcp && typeof doc.mcp === "object" && !Array.isArray(doc.mcp) && doc.mcp.servers
+          ? doc.mcp.servers
+          : doc.mcpServers
+        : doc[rootKey];
     const servers = {};
     if (section && typeof section === "object" && !Array.isArray(section)) {
       for (const [name, entry] of Object.entries(section)) {
@@ -497,11 +727,36 @@ export async function applyTargetMutations(target, upserts, removals) {
     nextText = updateCodexToml(originalText, upserts, removals);
   } else if (target.format === "dsh-cordis-yaml") {
     nextText = updateDshCordisYaml(originalText, upserts, removals);
-  } else {
+  } else if (target.format === "hermes-yaml") {
+    nextText = updateHermesYaml(originalText, upserts, removals);
+  } else if (target.format === "zcode-json") {
     const trimmed = originalText.trim();
     let doc = {};
     if (trimmed) {
       doc = JSON.parse(trimmed);
+      if (!doc || typeof doc !== "object" || Array.isArray(doc)) {
+        throw new Error(`Refusing to overwrite non-object JSON file: ${filePath}`);
+      }
+    }
+    const existingMcp =
+      doc.mcp && typeof doc.mcp === "object" && !Array.isArray(doc.mcp) ? { ...doc.mcp } : {};
+    const section =
+      existingMcp.servers && typeof existingMcp.servers === "object" && !Array.isArray(existingMcp.servers)
+        ? { ...existingMcp.servers }
+        : {};
+    for (const name of removals) {
+      delete section[name];
+    }
+    for (const [name, server] of Object.entries(upserts)) {
+      section[name] = serializeJsonEntry(server, target.format, section[name]);
+    }
+    const nextDoc = { ...doc, mcp: { ...existingMcp, servers: section } };
+    nextText = JSON.stringify(nextDoc, null, 2) + "\n";
+  } else {
+    const trimmed = originalText.trim();
+    let doc = {};
+    if (trimmed) {
+      doc = target.format === "vscode-json" ? parseJsonc(trimmed) : JSON.parse(trimmed);
       if (!doc || typeof doc !== "object" || Array.isArray(doc)) {
         throw new Error(`Refusing to overwrite non-object JSON file: ${filePath}`);
       }

@@ -8,8 +8,9 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { crc32, inflateRawSync } from "node:zlib";
 
-import { atomicWriteText } from "../backend/adapters.mjs";
+import { atomicWriteText, parseJsonc } from "../backend/adapters.mjs";
 import { parseDshCordisMcpServers, updateDshCordisYaml } from "../backend/dsh-yaml.mjs";
+import { parseHermesMcpServers, updateHermesYaml } from "../backend/hermes-yaml.mjs";
 import { activate, createHubController } from "../backend/index.mjs";
 import { probeMcpServer } from "../backend/probe.mjs";
 import { parseCodexMcpServers, updateCodexToml } from "../backend/toml.mjs";
@@ -70,6 +71,7 @@ test("manifest.json conforms to codexhost manifestVersion 2 contract and assets 
     manifest.backend.entry,
     "backend/adapters.mjs",
     "backend/dsh-yaml.mjs",
+    "backend/hermes-yaml.mjs",
     "backend/oauth.mjs",
     "backend/probe.mjs",
     "backend/store.mjs",
@@ -2895,6 +2897,355 @@ test("v2.5.5: DeepSeek Desktop & Web end-to-end discovery, cross-AI sync (YAML <
     const webRestored = await readFile(dshWebFile, "utf8");
     assert.equal(webRestored.includes("cloud_api"), false);
     assert.ok(webRestored.includes("# DeepSeek Web config"));
+  } finally {
+    hub.dispose();
+    await rm(tmpRoot, { recursive: true, force: true });
+  }
+});
+
+test("v2.5.6: Hermes YAML parser & surgical updater preserves unrelated settings, comments, extra keys (timeout/tools/auth), and rejects non-mapping roots", () => {
+  const original = [
+    "# Hermes Agent global config",
+    "model:",
+    '  default: "nous/hermes-4"',
+    "  temperature: 0.2",
+    "",
+    "# Existing MCP servers",
+    "mcp_servers:",
+    "  filesystem:",
+    '    command: "npx"',
+    "    args:",
+    '      - "-y"',
+    '      - "@modelcontextprotocol/server-filesystem"',
+    "      - '/tmp/work'",
+    "    enabled: true",
+    "    timeout: 120",
+    "  hermes-cloud:",
+    '    url: "https://portal.nousresearch.com/mcp"',
+    '    auth: "oauth"',
+    "    tools:",
+    "      include:",
+    "        - search",
+    "",
+    "# Terminal settings must stay untouched",
+    "terminal:",
+    "  backend: local",
+    "",
+  ].join("\n");
+
+  const parsed = parseHermesMcpServers(original);
+  assert.deepEqual(Object.keys(parsed).sort(), ["filesystem", "hermes-cloud"]);
+  assert.equal(parsed.filesystem.transport.command, "npx");
+  assert.deepEqual(parsed.filesystem.transport.args, ["-y", "@modelcontextprotocol/server-filesystem", "/tmp/work"]);
+  assert.equal(parsed["hermes-cloud"].transport.type, "http");
+  assert.equal(parsed["hermes-cloud"].transport.url, "https://portal.nousresearch.com/mcp");
+
+  // Update filesystem & hermes-cloud while adding a new HTTP server with headers; verify timeout/auth/tools & unrelated sections survive
+  const updated = updateHermesYaml(
+    original,
+    {
+      filesystem: {
+        name: "filesystem",
+        enabled: true,
+        transport: {
+          type: "stdio",
+          command: "npx",
+          args: ["-y", "@modelcontextprotocol/server-filesystem", "D:\\Work"],
+          env: { FS_MODE: "rw" },
+        },
+      },
+      "hermes-cloud": {
+        name: "hermes-cloud",
+        enabled: true,
+        transport: {
+          type: "http",
+          url: "https://portal.nousresearch.com/mcp/v2",
+          headers: { Authorization: "Bearer tok-hermes" },
+        },
+      },
+      context7: {
+        name: "context7",
+        enabled: false,
+        transport: { type: "http", url: "https://mcp.context7.com/mcp" },
+      },
+    },
+    [],
+  );
+
+  assert.ok(updated.includes("# Hermes Agent global config"));
+  assert.ok(updated.includes('default: "nous/hermes-4"'));
+  assert.ok(updated.includes("# Terminal settings must stay untouched"));
+  assert.ok(updated.includes("backend: local"));
+  // Extra vendor keys preserved on updated servers
+  assert.ok(updated.includes("timeout: 120"));
+  assert.ok(updated.includes("auth: oauth"));
+  assert.ok(updated.includes("- search"));
+
+  const reparsed = parseHermesMcpServers(updated);
+  assert.deepEqual(Object.keys(reparsed).sort(), ["context7", "filesystem", "hermes-cloud"]);
+  assert.equal(reparsed.filesystem.transport.args[2], "D:\\Work");
+  assert.equal(reparsed.filesystem.transport.env.FS_MODE, "rw");
+  assert.equal(reparsed["hermes-cloud"].transport.url, "https://portal.nousresearch.com/mcp/v2");
+  assert.equal(reparsed["hermes-cloud"].transport.headers.Authorization, "Bearer tok-hermes");
+  assert.equal(reparsed.context7.enabled, false);
+
+  // Switch filesystem stdio -> http and remove context7: cross-transport fields stripped
+  const switched = updateHermesYaml(
+    updated,
+    {
+      filesystem: {
+        name: "filesystem",
+        enabled: true,
+        transport: { type: "http", url: "https://fs.example.com/mcp" },
+      },
+    },
+    ["context7"],
+  );
+  assert.equal(switched.includes("server-filesystem"), false);
+  assert.equal(switched.includes("context7"), false);
+  assert.equal(parseHermesMcpServers(switched).filesystem.transport.url, "https://fs.example.com/mcp");
+
+  // Append mcp_servers to a file that doesn't have one yet
+  const appended = updateHermesYaml("model: claude\n", {
+    ping: { name: "ping", enabled: true, transport: { type: "stdio", command: "uvx", args: ["mcp-ping"] } },
+  }, []);
+  assert.ok(appended.includes("model: claude"));
+  assert.equal(parseHermesMcpServers(appended).ping.transport.command, "uvx");
+
+  // Reject sequence root & tab indentation
+  assert.throws(() => parseHermesMcpServers("- id: wrong\n"), /mapping/i);
+  assert.throws(() => parseHermesMcpServers("mcp_servers:\n\tfoo: bar\n"), /tab/i);
+});
+
+test("v2.5.6: 100% CodexHost Harness coverage — ZCode (mcp.servers), Oh My Pi (omp), Hermes (yaml), Devin CLI, Qoder & Qoder CN end-to-end sync", async () => {
+  const tmpRoot = await mkdtemp(path.join(os.tmpdir(), "mcp-hub-v256-"));
+  const fakeHome = path.join(tmpRoot, "home");
+  const dataDir = path.join(tmpRoot, "data");
+
+  const ompFile = path.join(fakeHome, ".omp", "agent", "mcp.json");
+  const zcodeFile = path.join(fakeHome, ".zcode", "cli", "config.json");
+  const hermesFile = path.join(fakeHome, ".hermes", "config.yaml");
+  const devinFile = path.join(fakeHome, "AppData", "Roaming", "devin", "mcp_config.json");
+  const qoderFile = path.join(fakeHome, ".qoder", "settings.json");
+  const qoderCnFile = path.join(fakeHome, ".qoder-cn", "settings.json");
+
+  for (const f of [ompFile, zcodeFile, hermesFile, devinFile, qoderFile, qoderCnFile]) {
+    await mkdir(path.dirname(f), { recursive: true });
+  }
+
+  await writeFile(ompFile, JSON.stringify({ $schema: "https://example.com/omp.json", mcpServers: {} }, null, 2), "utf8");
+  await writeFile(
+    zcodeFile,
+    JSON.stringify(
+      {
+        theme: "dark",
+        mcp: {
+          timeoutMs: 30000,
+          servers: {
+            zcode_existing: { type: "stdio", command: "node", args: ["z.mjs"] },
+          },
+        },
+      },
+      null,
+      2,
+    ),
+    "utf8",
+  );
+  await writeFile(hermesFile, "# Hermes\nmodel:\n  default: hermes-4\n", "utf8");
+  await writeFile(
+    devinFile,
+    JSON.stringify(
+      {
+        mcpServers: {
+          devin_sse: { url: "https://sse.devin.example.com/events", transport: "sse" },
+        },
+      },
+      null,
+      2,
+    ),
+    "utf8",
+  );
+  await writeFile(qoderFile, JSON.stringify({ theme: "intl", mcpServers: {} }, null, 2), "utf8");
+  await writeFile(qoderCnFile, JSON.stringify({ theme: "cn", mcpServers: {} }, null, 2), "utf8");
+
+  const hub = createHubController({
+    dataDir,
+    readSettings: async () => ({ autoBackup: true, excludeBuiltinMcp: true, enableAutoSync: false }),
+    home: fakeHome,
+    platform: "win32",
+  });
+
+  try {
+    const ov = await hub.buildOverview();
+    assert.equal(ov.targets.length, 24, "All 24 built-in AI targets must be registered");
+    for (const id of ["omp", "zcode", "hermes", "devin", "qoder", "qoder-cn"]) {
+      const tg = ov.targets.find((t) => t.id === id);
+      assert.ok(tg && tg.detected && tg.exists && !tg.error, `Target ${id} should be detected cleanly`);
+    }
+
+    // Import existing MCPs from ZCode (nested mcp.servers) and Devin (transport: "sse")
+    const imported = await hub.importFromTarget({ sourceTargetId: "all" });
+    const zSrv = imported.overview.servers.find((s) => s.name === "zcode_existing");
+    const dSrv = imported.overview.servers.find((s) => s.name === "devin_sse");
+    assert.ok(zSrv && zSrv.transport.command === "node");
+    assert.ok(dSrv && dSrv.transport.type === "sse" && dSrv.transport.url === "https://sse.devin.example.com/events");
+
+    // Push a shared HTTP MCP across all 6 new/split targets
+    await hub.saveServer({
+      name: "shared_cloud",
+      enabled: true,
+      transport: {
+        type: "http",
+        url: "https://shared.example.com/mcp",
+        headers: { Authorization: "Bearer v256" },
+      },
+      targets: ["omp", "zcode", "hermes", "devin", "qoder", "qoder-cn"],
+    });
+    await hub.applySync();
+
+    // Verify each target wrote in its exact native format while preserving unrelated settings
+    const ompAfter = JSON.parse(await readFile(ompFile, "utf8"));
+    assert.equal(ompAfter.$schema, "https://example.com/omp.json");
+    assert.equal(ompAfter.mcpServers.shared_cloud.url, "https://shared.example.com/mcp");
+
+    const zcodeAfter = JSON.parse(await readFile(zcodeFile, "utf8"));
+    assert.equal(zcodeAfter.theme, "dark");
+    assert.equal(zcodeAfter.mcp.timeoutMs, 30000);
+    assert.equal(zcodeAfter.mcp.servers.shared_cloud.type, "http");
+    assert.equal(zcodeAfter.mcp.servers.shared_cloud.headers.Authorization, "Bearer v256");
+    assert.equal(zcodeAfter.mcp.servers.zcode_existing.type, "stdio");
+
+    const hermesAfter = await readFile(hermesFile, "utf8");
+    assert.ok(hermesAfter.includes("# Hermes"));
+    assert.ok(hermesAfter.includes("default: hermes-4"));
+    assert.equal(parseHermesMcpServers(hermesAfter).shared_cloud.transport.headers.Authorization, "Bearer v256");
+
+    const devinAfter = JSON.parse(await readFile(devinFile, "utf8"));
+    assert.equal(devinAfter.mcpServers.shared_cloud.url, "https://shared.example.com/mcp");
+
+    const qoderAfter = JSON.parse(await readFile(qoderFile, "utf8"));
+    const qoderCnAfter = JSON.parse(await readFile(qoderCnFile, "utf8"));
+    assert.equal(qoderAfter.theme, "intl");
+    assert.equal(qoderAfter.mcpServers.shared_cloud.url, "https://shared.example.com/mcp");
+    assert.equal(qoderCnAfter.theme, "cn");
+    assert.equal(qoderCnAfter.mcpServers.shared_cloud.url, "https://shared.example.com/mcp");
+
+    // Hermes backup uses `.yml` extension and restores cleanly
+    const { backups } = await hub.listBackups();
+    const hermesBackup = backups.find((b) => b.targetId === "hermes");
+    assert.ok(hermesBackup && hermesBackup.payloadFile.endsWith(".yml"));
+    await hub.restoreBackup({ backupId: hermesBackup.id });
+    assert.equal((await readFile(hermesFile, "utf8")).includes("shared_cloud"), false);
+  } finally {
+    hub.dispose();
+    await rm(tmpRoot, { recursive: true, force: true });
+  }
+});
+
+test("v2.5.6: VS Code User mcp.json (JSONC with comments & trailing commas, servers root, inputs/gallery/version preservation, slash IDs) and project .vscode/mcp.json", async () => {
+  // 1. Unit-test parseJsonc with line comments, block comments, URLs inside strings, and trailing commas
+  const jsoncSample = `{
+    // VS Code user MCP config
+    "servers": {
+      "io.github.upstash/context7": {
+        "type": "http",
+        "url": "https://mcp.context7.com/mcp", // inline comment after URL
+        "gallery": "https://api.mcp.github.com",
+        "version": "4.4.2",
+      },
+      /* block comment */
+      "local_tool": {
+        "type": "stdio",
+        "command": "npx",
+        "args": ["-y", "demo-mcp",],
+        "envFile": "\${workspaceFolder}/.env",
+      },
+    },
+    "inputs": [
+      { "id": "api_key", "type": "promptString", "password": true, },
+    ],
+    "sandbox": { "network": { "allowedDomains": ["mcp.context7.com",], }, },
+  }`;
+  const parsedJsonc = parseJsonc(jsoncSample);
+  assert.equal(parsedJsonc.servers["io.github.upstash/context7"].url, "https://mcp.context7.com/mcp");
+  assert.equal(parsedJsonc.inputs.length, 1);
+  assert.equal(parsedJsonc.sandbox.network.allowedDomains[0], "mcp.context7.com");
+
+  const tmpRoot = await mkdtemp(path.join(os.tmpdir(), "mcp-hub-vscode-"));
+  const fakeHome = path.join(tmpRoot, "home");
+  const dataDir = path.join(tmpRoot, "data");
+  const projectDir = path.join(tmpRoot, "demo-project");
+  const vscodeFile = path.join(fakeHome, "AppData", "Roaming", "Code", "User", "mcp.json");
+  await mkdir(path.dirname(vscodeFile), { recursive: true });
+  await mkdir(projectDir, { recursive: true });
+  await writeFile(vscodeFile, jsoncSample, "utf8");
+
+  const hub = createHubController({
+    dataDir,
+    readSettings: async () => ({ autoBackup: true, excludeBuiltinMcp: true, enableAutoSync: false }),
+    home: fakeHome,
+    platform: "win32",
+  });
+
+  try {
+    const ov = await hub.buildOverview();
+    const vsTarget = ov.targets.find((t) => t.id === "vscode");
+    assert.ok(vsTarget && vsTarget.detected && vsTarget.exists && !vsTarget.error);
+    assert.equal(vsTarget.nativeCount, 2);
+
+    // Import slash-named Gallery server & stdio server cleanly
+    const imported = await hub.importFromTarget({ sourceTargetId: "vscode" });
+    const c7 = imported.overview.servers.find((s) => s.name === "io.github.upstash/context7");
+    const lt = imported.overview.servers.find((s) => s.name === "local_tool");
+    assert.ok(c7 && c7.transport.url === "https://mcp.context7.com/mcp");
+    assert.ok(lt && lt.transport.command === "npx");
+
+    // Update both existing VS Code servers AND add a new one -> inputs, sandbox, gallery, version, envFile preserved!
+    await hub.saveServer({
+      id: c7.id,
+      name: c7.name,
+      enabled: true,
+      transport: {
+        type: "http",
+        url: "https://mcp.context7.com/mcp",
+        headers: { Authorization: "Bearer vs-tok" },
+      },
+      targets: ["vscode"],
+    });
+    await hub.saveServer({
+      id: lt.id,
+      name: lt.name,
+      enabled: true,
+      transport: { type: "stdio", command: "npx", args: ["-y", "demo-mcp", "--v2"] },
+      targets: ["vscode"],
+    });
+    await hub.saveServer({
+      name: "brand_new",
+      enabled: true,
+      transport: { type: "stdio", command: "uvx", args: ["mcp-server-time"] },
+      targets: ["vscode"],
+    });
+    await hub.applySync();
+
+    const written = JSON.parse(await readFile(vscodeFile, "utf8"));
+    assert.equal(written.inputs.length, 1, "VS Code top-level inputs must be preserved");
+    assert.equal(written.sandbox.network.allowedDomains[0], "mcp.context7.com", "VS Code sandbox must be preserved");
+    assert.equal(written.servers["io.github.upstash/context7"].type, "http");
+    assert.equal(written.servers["io.github.upstash/context7"].headers.Authorization, "Bearer vs-tok");
+    assert.equal(written.servers["io.github.upstash/context7"].gallery, "https://api.mcp.github.com");
+    assert.equal(written.servers["io.github.upstash/context7"].version, "4.4.2");
+    assert.equal(written.servers.local_tool.envFile, "${workspaceFolder}/.env");
+    assert.equal(written.servers.brand_new.type, "stdio");
+    assert.equal(written.servers.brand_new.command, "uvx");
+
+    // Project-level `.vscode/mcp.json` sync & scan
+    await hub.syncProject({ projectDir, formatIds: ["project-vscode"] });
+    const projFile = path.join(projectDir, ".vscode", "mcp.json");
+    const projDoc = JSON.parse(await readFile(projFile, "utf8"));
+    assert.ok(projDoc.servers && projDoc.servers.brand_new.type === "stdio");
+    const scanned = await hub.scanProject({ projectDir });
+    const vsProjItem = scanned.items.find((i) => i.id === "project-vscode");
+    assert.ok(vsProjItem && vsProjItem.exists && vsProjItem.servers.length === 3);
   } finally {
     hub.dispose();
     await rm(tmpRoot, { recursive: true, force: true });

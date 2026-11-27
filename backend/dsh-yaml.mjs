@@ -27,7 +27,7 @@ const HTTP_TRANSPORT_KEYS = new Set(["url", "headers"]);
  * Strip an unquoted `# ...` comment from a YAML line.
  * In YAML, `#` begins a comment only at column 0 or when preceded by whitespace.
  */
-function stripYamlInlineComment(line) {
+export function stripYamlInlineComment(line) {
   let inDouble = false;
   let inSingle = false;
   let escaped = false;
@@ -56,7 +56,7 @@ function stripYamlInlineComment(line) {
 /**
  * Count leading spaces on a line. Throws if a tab is used for YAML indentation.
  */
-function measureIndent(line, lineNo) {
+export function measureIndent(line, lineNo) {
   let indent = 0;
   while (indent < line.length) {
     const ch = line[indent];
@@ -70,7 +70,7 @@ function measureIndent(line, lineNo) {
   return indent;
 }
 
-function isDashItemStart(trimmed) {
+export function isDashItemStart(trimmed) {
   return trimmed === "-" || trimmed.startsWith("- ") || trimmed.startsWith("-\t");
 }
 
@@ -277,7 +277,7 @@ function parseYamlKey(rawKey) {
   return s;
 }
 
-function splitKeyValue(trimmedLine) {
+export function splitKeyValue(trimmedLine) {
   if (!trimmedLine || trimmedLine.startsWith("{") || trimmedLine.startsWith("[")) return null;
   const colon = findMappingColon(trimmedLine);
   if (colon === -1) return null;
@@ -292,7 +292,7 @@ function splitKeyValue(trimmedLine) {
  * Parse a YAML block (sequence or mapping) from an array of lines.
  * Returns `{ value, nextIndex }`.
  */
-function parseYamlBlock(lines, startIdx, baseLineOffset = 1) {
+export function parseYamlBlock(lines, startIdx, baseLineOffset = 1) {
   const nextContent = (idx) => {
     while (idx < lines.length) {
       const stripped = stripYamlInlineComment(lines[idx]);
@@ -768,7 +768,7 @@ function formatYamlScalar(value) {
 /**
  * Serialize a JS value to YAML lines at the given indentation level.
  */
-function serializeYamlNode(value, indent = 0) {
+export function serializeYamlNode(value, indent = 0) {
   const pad = " ".repeat(indent);
   if (value === null || value === undefined || typeof value !== "object") {
     return [`${pad}${formatYamlScalar(value)}`];

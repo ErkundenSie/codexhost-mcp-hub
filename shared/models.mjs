@@ -40,8 +40,13 @@ export function normalizeTransport(raw) {
     };
   }
 
-  // OpenCode remote style or standard http/sse/streamable_http/streamable-http
-  const rawType = typeof raw.type === "string" ? raw.type.trim().toLowerCase() : "";
+  // OpenCode remote style or standard http/sse/streamable_http/streamable-http (supports `type` or `transport`)
+  const rawType =
+    typeof raw.type === "string" && raw.type.trim()
+      ? raw.type.trim().toLowerCase()
+      : typeof raw.transport === "string"
+        ? raw.transport.trim().toLowerCase()
+        : "";
   const urlCandidate =
     (typeof raw.url === "string" && raw.url.trim()) ||
     (typeof raw.serverUrl === "string" && raw.serverUrl.trim()) ||
@@ -103,8 +108,8 @@ export function normalizeServerName(name) {
   const trimmed = String(name ?? "").trim();
   if (!trimmed) throw new Error("Server name cannot be empty");
   if (trimmed.length > 100) throw new Error("Server name is too long (max 100 chars)");
-  if (/[\r\n\t/\\]/.test(trimmed)) {
-    throw new Error("Server name must not contain slashes or line breaks");
+  if (/[\r\n\t\\]/.test(trimmed)) {
+    throw new Error("Server name must not contain backslashes or line breaks");
   }
   return trimmed;
 }

@@ -1084,7 +1084,7 @@ export function renderModal(ctx) {
     ];
   } else if (m.type === "view-config") {
     const fmtLabel =
-      m.format === "codex-toml" ? "TOML" : m.format === "dsh-cordis-yaml" ? "YAML" : "JSON";
+      m.format === "codex-toml" ? "TOML" : m.format?.endsWith("-yaml") ? "YAML" : "JSON";
     title = `${m.targetName || m.targetId} · ${fmtLabel}`;
     body = [
       el("div", { className: "mh-path-readonly", style: "margin-top:0;margin-bottom:10px" }, [

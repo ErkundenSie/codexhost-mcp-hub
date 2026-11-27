@@ -27,6 +27,7 @@ export function renderProjectAndBackupsTab(ctx) {
     ["project-cursor", ".cursor/mcp.json", "Cursor / Cursor CLI"],
     ["project-codex", ".codex/config.toml", "Codex CLI"],
     ["project-opencode", "opencode.json", "OpenCode"],
+    ["project-vscode", ".vscode/mcp.json", "VS Code"],
   ];
 
   const scanRows = (state.projectScan?.items ?? []).map((item) =>

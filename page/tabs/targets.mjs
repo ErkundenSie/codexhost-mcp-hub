@@ -19,7 +19,7 @@ export function renderTargetsTab(ctx) {
     const isEditing = state.editingTargetPathId === tg.id;
     const isInstalled = tg.detected || tg.exists || tg.custom || tg.overridden;
     const fmtLabel =
-      tg.format === "codex-toml" ? "TOML" : tg.format === "dsh-cordis-yaml" ? "YAML" : "JSON";
+      tg.format === "codex-toml" ? "TOML" : tg.format?.endsWith("-yaml") ? "YAML" : "JSON";
     const pathInput = isEditing
       ? el("input", {
           className: "mh-input",

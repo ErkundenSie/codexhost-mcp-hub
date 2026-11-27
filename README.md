@@ -18,16 +18,16 @@
 
 ---
 
-**MCP Sync Hub** 让你在一个界面里集中管理本机所有 AI 客户端的 **Model Context Protocol (MCP)** 配置：支持自动扫描 18 个内置 AI 配置目标（含 DeepSeek Desktop / Web）、内置 OAuth 2.1 浏览器统一登录与多账户隔离、实时文件监听自动同步、HTTP/SSE 工具列表发现以及安全增量写入与自动备份。
+**MCP Sync Hub** 让你在一个界面里集中管理本机所有 AI 客户端的 **Model Context Protocol (MCP)** 配置：支持自动扫描 **24 个内置 AI 配置目标**（100% 覆盖 CodexHost 全部 20 个 Harness + VS Code / Claude Desktop / Gemini CLI / DeepSeek Web）、内置 OAuth 2.1 浏览器统一登录与多账户隔离、实时文件监听自动同步、HTTP/SSE 工具列表发现以及安全增量写入与自动备份。
 
-> **原生持久化**：所有变更直接写入各家 AI 自己的原生配置文件（`.toml` / `.json` / `.yml`）。即使关闭或卸载 CodexHost，你的 MCP 配置依然完整生效。
+> **原生持久化**：所有变更直接写入各家 AI 自己的原生配置文件（`.toml` / `.json` / `.yml` / `.yaml`）。即使关闭或卸载 CodexHost，你的 MCP 配置依然完整生效。
 
 ![MCP Sync Hub 界面预览](assets/preview.png)
 
 ## ✨ 核心特性
 
-- **🔍 自动扫描 18 个内置 AI 目标**
-  自动识别已安装的 AI 客户端配置文件（兼容 TOML、Cordis YAML、Standard JSON、Antigravity JSON、Copilot JSON、OpenCode JSON），支持查看原始配置文件、自定义路径与添加自定义 JSON 目标。
+- **🔍 自动扫描 24 个内置 AI 目标（100% 覆盖 CodexHost Harness + VS Code）**
+  自动识别已安装的 AI 客户端配置文件（兼容 TOML、DeepSeek Cordis YAML、Hermes YAML、VS Code JSONC、ZCode JSON、Standard JSON、Antigravity JSON、Copilot JSON、OpenCode JSON），支持查看原始配置文件、自定义路径与添加自定义 JSON 目标。
 - **🔐 内置 MCP OAuth 2.1 授权与多账户隔离**
   - 纯 Node 原生实现 RFC 9728 / RFC 8414 / RFC 7591 动态注册与 PKCE S256 浏览器授权；
   - 首次导入/加载时自动识别需要鉴权（HTTP 401）的远程 MCP 并持久化缓存，后续打开零重复网络请求；
@@ -45,11 +45,11 @@
   - 自动排除并保护官方内置 MCP（如 Codex `node_repl`）与指向本机 CodexHost（`127.0.0.1:4398/mcp`）的回环 MCP；
   - 每次写入前自动保存带时间戳的原文件备份（最多保留 40 份），支持随时一键恢复。
 - **📁 项目级 MCP 同步**
-  一键扫描并写入项目目录内的 `.mcp.json`、`.cursor/mcp.json`、`.codex/config.toml`、`opencode.json`。
+  一键扫描并写入项目目录内的 `.mcp.json`、`.cursor/mcp.json`、`.codex/config.toml`、`opencode.json`、`.vscode/mcp.json`。
 
 ## 🤖 支持的 AI 客户端
 
-除以下 18 个内置 AI 配置目标（覆盖不同客户端及独立 Profile）外，还支持在 **AI 配置** 页添加任意自定义 JSON 目标：
+除以下 **24 个内置 AI 配置目标**（100% 覆盖 CodexHost 全部 20 个 Harness + VS Code 及独立客户端/Profile）外，还支持在 **AI 配置** 页添加任意自定义 JSON 目标：
 
 | AI 客户端 | 配置格式 | 默认配置文件路径 |
 | --- | --- | --- |
@@ -57,20 +57,26 @@
 | **Grok** | `codex-toml` (`mcp_servers`) | `~/.grok/config.toml` |
 | **DeepSeek Desktop** | `dsh-cordis-yaml` (`mcp-manager` / `dsh-mcp-client`) | `~/.dsh/profiles/desktop/cordis.patch.yml` |
 | **DeepSeek Web** | `dsh-cordis-yaml` (`mcp-manager` / `dsh-mcp-client`) | `~/.dsh/profiles/web/cordis.patch.yml` |
+| **Hermes** | `hermes-yaml` (`mcp_servers`) | `~/.hermes/config.yaml` |
 | **Pi** | `standard-json` (`mcpServers`) | `~/.pi/agent/mcp.json` |
+| **Oh My Pi (`omp`)** | `standard-json` (`mcpServers`) | `~/.omp/agent/mcp.json` |
 | **Claude Code** | `standard-json` (`mcpServers`) | `~/.claude.json` |
 | **Claude Desktop** | `standard-json` (`mcpServers`) | Windows: `%APPDATA%\Claude\claude_desktop_config.json`<br/>macOS: `~/Library/Application Support/Claude/claude_desktop_config.json`<br/>Linux: `~/.config/Claude/claude_desktop_config.json` |
 | **Antigravity (`agy`)** | `antigravity-json` (`mcpServers`) | `~/.gemini/config/mcp_config.json` |
 | **Cursor / Cursor CLI** | `standard-json` (`mcpServers`) | `~/.cursor/mcp.json` |
 | **GitHub Copilot CLI** | `copilot-json` (`mcpServers`) | `~/.copilot/mcp-config.json` |
+| **VS Code** | `vscode-json` (`servers`, JSONC) | Windows: `%APPDATA%\Code\User\mcp.json`<br/>macOS: `~/Library/Application Support/Code/User/mcp.json`<br/>Linux: `~/.config/Code/User/mcp.json` |
 | **CodeBuddy** | `standard-json` (`mcpServers`) | `~/.codebuddy/mcp.json` |
 | **OpenCode** | `opencode-json` (`mcp`) | `~/.config/opencode/opencode.json` |
+| **ZCode** | `zcode-json` (`mcp.servers`) | `~/.zcode/cli/config.json` |
+| **Devin CLI** | `standard-json` (`mcpServers`) | Windows: `%APPDATA%\devin\mcp_config.json`<br/>macOS / Linux: `~/.config/devin/mcp_config.json` |
 | **Qwen Code** | `standard-json` (`mcpServers`) | `~/.qwen/settings.json` |
 | **Gemini CLI** | `standard-json` (`mcpServers`) | `~/.gemini/settings.json` |
 | **Kiro CLI** | `standard-json` (`mcpServers`) | `~/.kiro/settings/mcp.json` |
 | **Kimi Code** | `standard-json` (`mcpServers`) | `~/.kimi/mcp.json` |
 | **WorkBuddy** | `standard-json` (`mcpServers`) | `~/.workbuddy/mcp.json` |
-| **Qoder** | `standard-json` (`mcpServers`) | `~/.qoder-cn/mcp.json` |
+| **Qoder** | `standard-json` (`mcpServers`) | `~/.qoder/settings.json` |
+| **Qoder CN** | `standard-json` (`mcpServers`) | `~/.qoder-cn/settings.json` |
 
 ## 🚀 安装方式
 
@@ -144,8 +150,9 @@ codexhost-mcp-hub/
 │   └── style.css                 # 主题适配样式（自动跟随浅色 / 深色模式）
 ├── backend/
 │   ├── index.mjs                 # 单实例 Node 后端入口 (activate) 与全部 RPC
-│   ├── adapters.mjs              # 18 个内置 AI 目标 + 自定义目标 + 项目级格式适配器
+│   ├── adapters.mjs              # 24 个内置 AI 目标 + 自定义目标 + 项目级格式适配器
 │   ├── dsh-yaml.mjs              # DeepSeek Cordis YAML 注释与插件块保留型局部更新器
+│   ├── hermes-yaml.mjs           # Hermes config.yaml `mcp_servers` 局部更新器
 │   ├── oauth.mjs                 # 纯 Node MCP OAuth 2.1（PKCE + 自动续期 + 多账户隔离）
 │   ├── probe.mjs                 # Streamable HTTP (JSON/SSE) 工具发现与 stdio 路径探测
 │   ├── watcher.mjs               # 父目录级 fs.watch 防抖监听与自写抑制器

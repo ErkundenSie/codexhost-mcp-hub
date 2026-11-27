@@ -2,6 +2,24 @@
 
 本项目记录每个正式版本的主要新增功能、优化与问题修复。
 
+## [v2.5.6] - 2026-11-27
+
+### ✨ 新增功能
+- **100% 覆盖 CodexHost 全部 20 个 Harness + VS Code（内置 AI 目标增至 24 个）**：
+  - **VS Code (`vscode`)**：新增 `vscode-json` 格式（完整支持 JSONC `//`、`/* */` 注释与尾逗号），自动扫描全局 `User/mcp.json`（Windows `%APPDATA%\Code\User\mcp.json` / macOS `~/Library/Application Support/Code/User/mcp.json` / Linux `~/.config/Code/User/mcp.json`）与项目级 `.vscode/mcp.json`；使用官方顶层 `servers` 结构，写入时完整保留 `inputs`、`sandbox` 与单服务的 `gallery`、`version`、`envFile`、`oauth`、`dev` 元数据，并兼容商店含 `/` 名称（如 `io.github.upstash/context7`）。
+  - **Oh My Pi (`omp`)**：支持 `~/.omp/agent/mcp.json`（标准 `mcpServers` JSON）。
+  - **ZCode (`zcode`)**：新增 `zcode-json` 格式，支持 `~/.zcode/cli/config.json` 嵌套结构 `mcp.servers`（兼容读取回退 `mcpServers`，写入时保留同级 `mcp` 与全局配置）。
+  - **Hermes (`hermes`)**：新增零依赖局部更新器 `backend/hermes-yaml.mjs`，支持 `~/.hermes/config.yaml` 的 `mcp_servers` 区块，逐字节保留其他顶层设置、注释以及单服务的 `timeout` / `tools` / `auth` 等扩展字段。
+  - **Devin CLI (`devin`)**：支持 Windows `%APPDATA%\devin\mcp_config.json` 与 macOS / Linux `~/.config/devin/mcp_config.json`。
+  - **Qoder / Qoder CN 独立拆分**：按 Qoder CLI 官方规范拆分为国际版 **Qoder**（`~/.qoder/settings.json`）与国内版 **Qoder CN**（`~/.qoder-cn/settings.json`），互不串写。
+
+### 🛠️ 优化与修复
+- `shared/models.mjs` 的 `normalizeTransport` 新增对 `transport` 字段（如 Devin 的 `"transport": "sse"`）的兼容识别；`normalizeServerName` 放行 `/` 以兼容 VS Code Gallery 命名空间 ID。
+- 前端 AI 配置页与原文查看弹窗自动为所有 `*-yaml` 目标（DeepSeek、Hermes）展示 `YAML` 格式标签；项目级同步新增 `.vscode/mcp.json` 选项。
+- 新增 VS Code JSONC、Hermes YAML 及 ZCode / OMP / Devin / Qoder / Qoder CN 单元测试与端到端回归测试（共 28 项测试全部通过）。
+
+---
+
 ## [v2.5.5] - 2026-11-27
 
 ### ✨ 新增功能
